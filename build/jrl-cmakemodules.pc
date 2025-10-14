@@ -1,0 +1,22 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${pcfiledir}/../..
+libdir=${pcfiledir}/../../lib
+bindir=${pcfiledir}/../../bin
+pkglibdir=${pcfiledir}/../../lib/jrl-cmakemodules
+includedir=${pcfiledir}/../../include
+datarootdir=${pcfiledir}/../../share
+pkgdatarootdir=${pcfiledir}/../../share
+docdir=${pcfiledir}/../../share/doc/jrl-cmakemodules
+doxygendocdir=${pcfiledir}/../../share/doc/jrl-cmakemodules/doxygen-html
+
+Name: jrl-cmakemodules
+Description: CMake utility toolbox
+URL: http://github.com/jrl-umi3218/jrl-cmakemodules
+Version: 1.1.0
+Requires: 
+Conflicts: 
+Libs: -L${libdir} 
+Libs.private: 
+Cflags:  -I${includedir}
+
+
