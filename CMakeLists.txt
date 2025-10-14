@@ -48,6 +48,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
       ./gitlog-to-changelog
       ./pixi.py
       ./pyproject.py
+      ./release.py
     DESTINATION ${INSTALL_DIR}
   )
 
