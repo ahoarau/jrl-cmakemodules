@@ -74,6 +74,104 @@ function(jrl_check_target_exists target_name)
     endif()
 endfunction()
 
+# Internal: get direct *target* dependencies of a target.
+# Collects link items from LINK_LIBRARIES and INTERFACE_LINK_LIBRARIES, then
+# filters out non-target entries (e.g. generator expressions, flags, keywords).
+function(_jrl_target_get_direct_target_dependencies target_name out_var)
+    set(link_items "")
+
+    get_target_property(_ll ${target_name} LINK_LIBRARIES)
+    if(_ll AND NOT _ll STREQUAL "LINK_LIBRARIES-NOTFOUND")
+        list(APPEND link_items ${_ll})
+    endif()
+
+    get_target_property(_ill ${target_name} INTERFACE_LINK_LIBRARIES)
+    if(_ill AND NOT _ill STREQUAL "INTERFACE_LINK_LIBRARIES-NOTFOUND")
+        list(APPEND link_items ${_ill})
+    endif()
+
+    set(result "")
+    foreach(item IN LISTS link_items)
+        # Ignore CMake's link keywords
+        if(item STREQUAL "debug" OR item STREQUAL "optimized" OR item STREQUAL "general")
+            continue()
+        endif()
+
+        # Skip generator expressions and flags/paths that aren't targets
+        if(item MATCHES "^\\$<")
+            continue()
+        endif()
+
+        if(TARGET "${item}")
+            list(APPEND result "${item}")
+        endif()
+    endforeach()
+
+    if(result)
+        list(REMOVE_DUPLICATES result)
+    endif()
+    set(${out_var} "${result}" PARENT_SCOPE)
+endfunction()
+
+# Internal: compute transitive closure of *target* dependencies.
+function(_jrl_target_get_transitive_target_dependencies target_name out_var)
+    set(visited "${target_name}")
+    _jrl_target_get_direct_target_dependencies(${target_name} queue)
+    set(all_deps "")
+
+    while(queue)
+        list(POP_FRONT queue dep)
+        if(dep IN_LIST visited)
+            continue()
+        endif()
+
+        list(APPEND visited "${dep}")
+        list(APPEND all_deps "${dep}")
+
+        _jrl_target_get_direct_target_dependencies(${dep} dep_direct)
+        foreach(next IN LISTS dep_direct)
+            if(NOT next IN_LIST visited)
+                list(APPEND queue "${next}")
+            endif()
+        endforeach()
+    endwhile()
+
+    if(all_deps)
+        list(REMOVE_DUPLICATES all_deps)
+    endif()
+    set(${out_var} "${all_deps}" PARENT_SCOPE)
+endfunction()
+
+# Usage: jrl_target_get_dependencies(TARGET <target> [OUT_DIRECT <var>] [OUT_TRANSITIVE <var>])
+# - OUT_DIRECT: direct target dependencies (targets only)
+# - OUT_TRANSITIVE: transitive target dependencies (targets only, excludes the target itself)
+function(jrl_target_get_dependencies)
+    set(options)
+    set(oneValueArgs TARGET OUT_DIRECT OUT_TRANSITIVE)
+    set(multiValueArgs)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    jrl_check_var_defined(arg_TARGET)
+    jrl_check_target_exists(${arg_TARGET})
+
+    if(NOT arg_OUT_DIRECT AND NOT arg_OUT_TRANSITIVE)
+        message(
+            FATAL_ERROR
+            "jrl_target_get_dependencies: specify OUT_DIRECT and/or OUT_TRANSITIVE."
+        )
+    endif()
+
+    if(arg_OUT_DIRECT)
+        _jrl_target_get_direct_target_dependencies(${arg_TARGET} direct_deps)
+        set(${arg_OUT_DIRECT} "${direct_deps}" PARENT_SCOPE)
+    endif()
+
+    if(arg_OUT_TRANSITIVE)
+        _jrl_target_get_transitive_target_dependencies(${arg_TARGET} transitive_deps)
+        set(${arg_OUT_TRANSITIVE} "${transitive_deps}" PARENT_SCOPE)
+    endif()
+endfunction()
+
 function(jrl_check_valid_visibility visibility)
     set(vs PRIVATE PUBLIC INTERFACE)
     if(NOT ${visibility} IN_LIST vs)
@@ -1631,35 +1729,52 @@ function(jrl_python_generate_init_py name)
         message(FATAL_ERROR "OUTPUT_PATH argument is required")
     endif()
 
-    get_target_property(python_module_link_libraries ${name} LINK_LIBRARIES)
-    message(DEBUG "Python module '${name}' link libraries: [${python_module_link_libraries}]")
+    # Compute the complete (transitive) target dependency closure.
+    # We only consider CMake targets (non-target link items are ignored by jrl_target_get_dependencies).
+    jrl_target_get_dependencies(
+        TARGET ${name}
+        OUT_TRANSITIVE python_module_transitive_deps
+    )
+    message(
+        STATUS
+        "Python module '${name}' transitive target deps: [${python_module_transitive_deps}]"
+    )
 
     set(dlls_to_link "")
-    list(REMOVE_DUPLICATES python_module_link_libraries)
-    foreach(target IN LISTS python_module_link_libraries)
-        get_target_property(target_type ${target} TYPE)
-        get_target_property(is_imported ${target} IMPORTED)
-        message(
-            DEBUG
-            "Checking target '${target}' of type '${target_type}' for dll linking. Imported: '${is_imported}'"
-        )
+    foreach(dep_target IN LISTS python_module_transitive_deps)
+        if(NOT TARGET ${dep_target})
+            continue()
+        endif()
 
+        get_target_property(target_type ${dep_target} TYPE)
+        get_target_property(is_imported ${dep_target} IMPORTED)
+        if(NOT is_imported)
+            set(is_imported FALSE)
+        endif()
+        message(
+            STATUS
+            "    => Analyzing dependency target '${dep_target}': TYPE='${target_type}', IMPORTED='${is_imported}'"
+        )
+        # Keep only buildsystem shared/module libraries (i.e. potential runtime DLLs).
         if(
-            target_type STREQUAL "SHARED_LIBRARY"
-            OR target_type STREQUAL "MODULE_LIBRARY"
-            AND NOT ${is_imported}
+            (target_type STREQUAL "SHARED_LIBRARY" OR target_type STREQUAL "MODULE_LIBRARY")
+            # AND (NOT is_imported)
         )
             message(
-                DEBUG
-                "    => Adding target '${target}' to dlls to link for python module '${name}'"
+                STATUS
+                "        => Keeping dependency target '${dep_target}' as buildsystem dll to link"
             )
-            list(APPEND dlls_to_link ${target})
+            list(APPEND dlls_to_link ${dep_target})
         endif()
     endforeach()
 
+    if(dlls_to_link)
+        list(REMOVE_DUPLICATES dlls_to_link)
+    endif()
+
     message(
-        DEBUG
-        "Python module '${name}' depends on the following buildsystem dlls: [${dlls_to_link}]"
+        STATUS
+        "Python module '${name}' depends on the following buildsystem dll targets: [${dlls_to_link}]"
     )
 
     # Get the relative paths between the python module and each dll
@@ -1668,13 +1783,51 @@ function(jrl_python_generate_init_py name)
         get_target_property(python_module_dir ${name} LIBRARY_OUTPUT_DIRECTORY)
         jrl_check_var_defined(python_module_dir "LIBRARY_OUTPUT_DIRECTORY not set for target '${name}', add it using 'set_target_properties(<target> PROPERTIES LIBRARY_OUTPUT_DIRECTORY <dir>)'")
 
-        get_target_property(dll_dir ${dll_name} RUNTIME_OUTPUT_DIRECTORY)
-        jrl_check_var_defined(dll_dir)
+        get_target_property(is_imported ${dll_name} IMPORTED)
+        message(STATUS "    => Processing dll target '${dll_name}': IMPORTED='${is_imported}'")
+        #  Try to get the location directly first
+        set(dll_dir "")
+        if(is_imported)
+            get_target_property(dll_location ${dll_name} LOCATION)
+            # get the directory part
+            get_filename_component(dll_dir ${dll_location} DIRECTORY)
+            message(
+                STATUS
+                "    => Checking LOCATION of IMPORTED dll target '${dll_name}': '${dll_dir}'"
+            )
+        endif()
+
+        message(STATUS "    => Checking LOCATION of dll target '${dll_name}': '${dll_dir}'")
+        if(NOT dll_dir)
+            # Then try RUNTIME_OUTPUT_DIRECTORY
+            get_target_property(dll_dir ${dll_name} RUNTIME_OUTPUT_DIRECTORY)
+            message(
+                STATUS
+                "    => Checking RUNTIME_OUTPUT_DIRECTORY of dll target '${dll_name}': '${dll_dir}'"
+            )
+            if(NOT dll_dir)
+                # Fallback to global runtime output directory if the target has none.
+                if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+                    message(
+                        STATUS
+                        "    => Using CMAKE_RUNTIME_OUTPUT_DIRECTORY for dll target '${dll_name}': '${CMAKE_RUNTIME_OUTPUT_DIRECTORY}'"
+                    )
+                    set(dll_dir ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+                endif()
+            endif()
+        endif()
+        jrl_check_var_defined(dll_dir "RUNTIME_OUTPUT_DIRECTORY not set for target '${dll_name}', set it (or CMAKE_RUNTIME_OUTPUT_DIRECTORY) so __init__.py can compute relative paths")
 
         file(RELATIVE_PATH rel_path ${python_module_dir} ${dll_dir})
+
+        message(
+            STATUS
+            "    => Relative path from python module '${name}' to dll '${dll_name}': '${rel_path}'"
+        )
         list(APPEND all_rel_paths ${rel_path})
     endforeach()
 
+    list(REMOVE_DUPLICATES all_rel_paths)
     # Final formatting to a Python list
     set(dll_dirs "[")
     foreach(rel_path IN LISTS all_rel_paths)
