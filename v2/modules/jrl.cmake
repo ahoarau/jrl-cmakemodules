@@ -2444,3 +2444,53 @@ function(jrl_boostpy_add_stubs name)
         add_dependencies(${name} ${arg_DEPENDS})
     endif()
 endfunction()
+
+function(jrl_generate_ros2_package_files)
+    set(options SKIP_INSTALL)
+    set(oneValueArgs GEN_DIR PACKAGE_XML_PATH)
+    set(multiValueArgs)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    message(STATUS "Generating files for ament (ROS 2)")
+
+    jrl_require_var_defined(PACKAGE_XML_PATH)
+
+    if(arg_GEN_DIR)
+        set(GEN_DIR ${arg_GEN_DIR})
+    else()
+        set(GEN_DIR ${CMAKE_BINARY_DIR}/generated/ros2/${PROJECT_NAME}/ros2)
+    endif()
+
+    jrl_require_var_defined(CMAKE_INSTALL_DATADIR
+        "
+        CMAKE_INSTALL_DATADIR is not defined.
+        Did you call either jrl_configure_defaults(), or jrl_configure_default_install_dirs(), or include(GNUInstallDirs) ?
+        "
+    )
+    file(WRITE ${GEN_DIR}/share/ament_index/resource_index/packages/${PROJECT_NAME} "")
+
+    install(
+        FILES ${GEN_DIR}/share/ament_index/resource_index/packages/${PROJECT_NAME}
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/ament_index/resource_index/packages
+    )
+
+    file(
+        WRITE ${GEN_DIR}/share/${PROJECT_NAME}/hook/ament_prefix_path.dsv
+        "prepend-non-duplicate;AMENT_PREFIX_PATH;"
+    )
+    install(
+        FILES ${GEN_DIR}/share/${PROJECT_NAME}/hook/ament_prefix_path.dsv
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME}/hook
+    )
+
+    # PYTHON FILES
+    jrl_python_relative_site_packages(python_relative_site_packages)
+    file(
+        WRITE ${GEN_DIR}/share/${PROJECT_NAME}/hook/python_path.dsv
+        "prepend-non-duplicate;PYTHONPATH;${python_relative_site_packages}"
+    )
+    install(
+        FILES ${GEN_DIR}/share/${PROJECT_NAME}/hook/python_path.dsv
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME}/hook
+    )
+endfunction()
