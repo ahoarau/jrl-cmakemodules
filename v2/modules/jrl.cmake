@@ -4086,3 +4086,35 @@ if(GENERATE_API_DOC)
     _jrl_docs_dir(docs_dir)
     _jrl_generate_api_doc(${CMAKE_CURRENT_LIST_FILE} ${docs_dir}/api.md)
 endif()
+
+function(jrl_add_compatibility_option)
+    set(options)
+    set(oneValueArgs NEW_OPTION_NAME)
+    set(multiValueArgs OLD_OPTION_NAMES)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    _jrl_check_var_defined(arg_NEW_OPTION_NAME)
+    _jrl_check_var_defined(arg_OLD_OPTION_NAMES)
+
+    foreach(old_option_name ${arg_OLD_OPTION_NAMES})
+        if(DEFINED ${old_option_name})
+            message(
+                WARNING
+                "Option ${old_option_name} is deprecated. Please use ${arg_NEW_OPTION_NAME} instead."
+            )
+            # if available, get the description from the new option
+            get_property(help CACHE ${arg_NEW_OPTION_NAME} PROPERTY HELPSTRING)
+            if(NOT help)
+                set(help "Added for compatibility with deprecated option ${old_option_name}")
+            endif()
+            set(${arg_NEW_OPTION_NAME} ${${old_option_name}} CACHE BOOL "${help}" FORCE)
+        endif()
+    endforeach()
+
+    set_property(
+        GLOBAL
+        PROPERTY
+            _jrl_${PROJECT_NAME}_option_${arg_NEW_OPTION_NAME}_compat_option
+                "${arg_OLD_OPTION_NAMES}"
+    )
+endfunction()
