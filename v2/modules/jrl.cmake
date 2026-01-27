@@ -1804,6 +1804,7 @@ jrl_find_package(
     [COMPONENTS <comp>...]
     [REQUIRED]
     [MODULE_PATH <path_to_find_module>]
+    [EXPECTED_TARGETS <target>...]
 )
 ```
 
@@ -1821,6 +1822,8 @@ jrl_find_package(
 ### Arguments
     <PackageName> [<version>] [REQUIRED] [COMPONENTS <components>...] - The same as find_package.
 * `MODULE_PATH`: Path to a dir containing a custom Find<PackageName>.cmake module file.
+* `EXPECTED_TARGETS`: List of targets expected to be found after the find_package call.
+    If targets are already defined, the find_package call is skipped.
 
 
 ### Example
@@ -1832,15 +1835,59 @@ jrl_find_package(Boost REQUIRED COMPONENTS filesystem system)
 macro(jrl_find_package)
     set(options)
     set(oneValueArgs MODULE_PATH)
-    set(multiValueArgs)
+    set(multiValueArgs EXPECTED_TARGETS)
     cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
-
-    message(STATUS "[${ARGV0}]")
-    message(DEBUG "Executing jrl_find_package with args ${ARGV}")
 
     # Pkg name is the first argument of find_package(<pkg_name> ...)
     set(package_name ${ARGV0})
     set(find_package_args "${arg_UNPARSED_ARGUMENTS}")
+
+    message(STATUS "[${package_name}]")
+    message(DEBUG "Executing jrl_find_package with args ${ARGV}")
+
+    # Check if expected targets are already defined
+    set(all_targets_found false)
+    foreach(expected_target IN LISTS arg_EXPECTED_TARGETS)
+        if(NOT TARGET ${expected_target})
+            set(all_targets_found false)
+            break()
+        endif()
+    endforeach()
+
+    # foreach(expected_target IN LISTS arg_EXPECTED_TARGETS)
+    #     if(TARGET ${expected_target})
+    #         message(STATUS "   Expected target '${expected_target}' is already defined.")
+
+    #         # check if the target is an alias, if so, get the actual target
+    #         set(actual_target ${expected_target})
+    #         get_target_property(aliased_target ${expected_target} ALIASED_TARGET)
+    #         if(aliased_target)
+    #             message(STATUS "   Target '${expected_target}' is an alias for target '${aliased_target}'.")
+    #             set(actual_target ${aliased_target})
+    #         endif()
+
+    #         # # Check if the target is IMPORTED
+    #         # get_target_property(target_type ${actual_target} TYPE)
+    #         # if(NOT target_type STREQUAL "IMPORTED_LIBRARY" AND NOT target_type STREQUAL "IMPORTED_EXECUTABLE" AND NOT target_type STREQUAL "IMPORTED")
+    #         #     message(STATUS "   Adding IMPORTED property to target '${actual_target}'.")
+    #         #     set_target_properties(${actual_target} PROPERTIES IMPORTED true)
+    #         # endif()
+    #     else()
+    #         message(STATUS "   Expected target '${expected_target}' is NOT defined.")
+    #         set(all_targets_found false)
+    #     endif()
+    # endforeach()
+
+    if(all_targets_found)
+        message(
+            STATUS
+            "   All expected targets (${arg_EXPECTED_TARGETS}) are already defined.
+        Skipping find_package call.
+        "
+        )
+        set(${package_name}_FOUND true)
+        set(skip_find_package true)
+    endif()
 
     # Handle custom module file
     if(arg_MODULE_PATH)
@@ -1864,8 +1911,10 @@ macro(jrl_find_package)
     endif()
 
     # Call find_package with the provided arguments
-    string(REPLACE ";" " " fp_pp "${find_package_args}")
-    message(STATUS "   Executing find_package(${fp_pp})")
+    if(NOT skip_find_package)
+        string(REPLACE ";" " " fp_pp "${find_package_args}")
+        message(STATUS "   Executing find_package(${fp_pp})")
+    endif()
 
     # Saving the list of imported targets and variables BEFORE the call to find_package
     get_property(
@@ -1875,12 +1924,16 @@ macro(jrl_find_package)
     )
     get_property(variables_before DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VARIABLES)
 
-    find_package(${find_package_args}) # TODO: handle QUIET properly
-
-    if(${package_name}_FOUND)
-        message(STATUS "   Executing find_package()...✅")
+    if(skip_find_package)
+        message(STATUS "   ${package_name}...✅")
     else()
-        message(STATUS "   Executing find_package()...❌")
+        find_package(${find_package_args}) # TODO: handle QUIET properly
+
+        if(${package_name}_FOUND)
+            message(STATUS "   Executing find_package()...✅")
+        else()
+            message(STATUS "   Executing find_package()...❌")
+        endif()
     endif()
 
     # Put back CMAKE_MODULE_PATH to its previous value
@@ -1893,6 +1946,10 @@ macro(jrl_find_package)
     get_property(package_targets DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY IMPORTED_TARGETS)
     list(REMOVE_ITEM package_variables ${variables_before} variables_before)
     list(REMOVE_ITEM package_targets ${imported_targets_before})
+
+    if(arg_EXPECTED_TARGETS)
+        list(APPEND package_targets ${arg_EXPECTED_TARGETS})
+    endif()
 
     if(${package_name}_VERSION)
         message(STATUS "   Version found: ${${package_name}_VERSION}")
