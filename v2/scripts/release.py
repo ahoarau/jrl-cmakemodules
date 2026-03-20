@@ -194,6 +194,20 @@ STYLE_NEW_VALUE = "green"
 STYLE_UNCHANGED_VALUE = "dim"
 STYLE_HIGHLIGHT = "cyan"
 
+IGNORED_DISCOVERY_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".tox",
+    ".venv",
+    "venv",
+    "build",
+    "install",
+    "dist",
+    "node_modules",
+    "__pycache__",
+}
+
 
 class VersionExtractor(ABC):
     def __init__(self, file_path: Path):
@@ -532,6 +546,101 @@ class ChangelogVersionExtractor(RegexVersionExtractor):
         console.print(
             f"[{STYLE_INFO}]Updated CHANGELOG.md header. Note: Link definitions at the bottom were not updated automatically.[/{STYLE_INFO}]"
         )
+
+
+def should_skip_discovery_dir(path: Path, root_dir: Path) -> bool:
+    """Return True when a directory should be excluded from package discovery."""
+    if path == root_dir:
+        return False
+    return any(part in IGNORED_DISCOVERY_DIRS for part in path.parts)
+
+
+def has_root_level_metadata_files(root_dir: Path) -> bool:
+    """Return True if the repository root contains repo-level version metadata."""
+    root_files = [
+        "pyproject.toml",
+        "CHANGELOG.md",
+        "pixi.toml",
+        "CITATION.cff",
+    ]
+    return any((root_dir / file_name).exists() for file_name in root_files)
+
+
+def discover_package_roots(root_dir: Path) -> List[Path]:
+    """Discover package roots for single-package and meta-package repositories."""
+    package_roots = set()
+
+    for package_xml in root_dir.rglob("package.xml"):
+        package_root = package_xml.parent
+        if should_skip_discovery_dir(package_root, root_dir):
+            continue
+        package_roots.add(package_root)
+
+    return sorted(package_roots)
+
+
+def build_checks_for_root(
+    root_dir: Path,
+    *,
+    include_package_files: bool = True,
+    include_metadata_files: bool = True,
+) -> List[VersionExtractor]:
+    """Build the list of version extractors for a package root."""
+    checks = []
+
+    if include_package_files:
+        checks.extend(
+            [
+                XmlVersionExtractor(root_dir / "package.xml"),
+                CMakeListsVersionExtractor(root_dir / "CMakeLists.txt"),
+            ]
+        )
+
+    if include_metadata_files:
+        checks.extend(
+            [
+                TomlVersionExtractor(
+                    root_dir / "pyproject.toml", ["project", "version"]
+                ),
+                ChangelogVersionExtractor(root_dir / "CHANGELOG.md", r""),
+                TomlVersionExtractor(root_dir / "pixi.toml", ["workspace", "version"]),
+                YamlVersionExtractor(root_dir / "CITATION.cff", ["version"]),
+            ]
+        )
+
+    return checks
+
+
+def collect_version_checks(root_dir: Path) -> List[VersionExtractor]:
+    """Collect version extractors from the repository root and nested package roots."""
+    checks = []
+    seen_paths = set()
+    package_roots = discover_package_roots(root_dir)
+
+    include_root_package_files = root_dir in package_roots or (
+        not package_roots and (root_dir / "CMakeLists.txt").exists()
+    )
+    include_root_metadata_files = has_root_level_metadata_files(root_dir)
+
+    if include_root_package_files or include_root_metadata_files:
+        for check in build_checks_for_root(
+            root_dir,
+            include_package_files=include_root_package_files,
+            include_metadata_files=include_root_metadata_files,
+        ):
+            if check.file_path in seen_paths:
+                continue
+            checks.append(check)
+            seen_paths.add(check.file_path)
+
+    for package_root in package_roots:
+        for check in build_checks_for_root(package_root):
+            if check.file_path in seen_paths:
+                continue
+            checks.append(check)
+            seen_paths.add(check.file_path)
+
+    return checks
 
 
 def validate_semver(version: str) -> str:
@@ -1322,14 +1431,7 @@ def main():
             )
             sys.exit(1)
 
-    checks: List[VersionExtractor] = [
-        XmlVersionExtractor(root_dir / "package.xml"),
-        TomlVersionExtractor(root_dir / "pyproject.toml", ["project", "version"]),
-        ChangelogVersionExtractor(root_dir / "CHANGELOG.md", r""),
-        TomlVersionExtractor(root_dir / "pixi.toml", ["workspace", "version"]),
-        YamlVersionExtractor(root_dir / "CITATION.cff", ["version"]),
-        CMakeListsVersionExtractor(root_dir / "CMakeLists.txt"),
-    ]
+    checks = collect_version_checks(root_dir)
 
     if args.list_files:
         if args.output_format == "json":

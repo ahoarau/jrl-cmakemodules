@@ -186,6 +186,65 @@ def project_dir(
     return tmp_path
 
 
+@pytest.fixture
+def meta_package_dir(tmp_path):
+    """Create a meta-package repository with nested ROS packages."""
+    changelog_content = """# Changelog
+
+## [Unreleased]
+
+## [1.0.0] - 2024-01-15
+
+### Added
+- Initial release
+"""
+    (tmp_path / "CHANGELOG.md").write_text(changelog_content, encoding="utf-8")
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.10)\nadd_subdirectory(pkg_a)\nadd_subdirectory(pkg_b)\n",
+        encoding="utf-8",
+    )
+
+    for package_name in ("pkg_a", "pkg_b"):
+        package_dir = tmp_path / package_name
+        package_dir.mkdir()
+        (package_dir / "package.xml").write_text(
+            f"""<?xml version=\"1.0\"?>
+<package format=\"2\">
+  <name>{package_name}</name>
+  <version>1.0.0</version>
+  <description>{package_name}</description>
+</package>
+""",
+            encoding="utf-8",
+        )
+        (package_dir / "CMakeLists.txt").write_text(
+            f"""cmake_minimum_required(VERSION 3.10)
+project({package_name} VERSION 1.0.0)
+""",
+            encoding="utf-8",
+        )
+
+    return tmp_path
+
+
+@pytest.fixture
+def nested_packages_only_dir(tmp_path):
+    """Create a repository containing only nested ROS packages."""
+    for package_name in ("pkg_a", "pkg_b"):
+        package_dir = tmp_path / package_name
+        package_dir.mkdir()
+        (package_dir / "package.xml").write_text(
+            f"<package><name>{package_name}</name><version>1.0.0</version></package>",
+            encoding="utf-8",
+        )
+        (package_dir / "CMakeLists.txt").write_text(
+            f"project({package_name} VERSION 1.0.0)\n",
+            encoding="utf-8",
+        )
+
+    return tmp_path
+
+
 # ============================================================================
 # TEST VersionExtractor Base Class
 # ============================================================================
@@ -827,6 +886,29 @@ def test_get_current_version_some_missing(tmp_path):
     assert version == "3.2.1"
 
 
+def test_discover_package_roots_meta_package(meta_package_dir):
+    """Test package discovery returns only actual nested package roots."""
+    roots = release.discover_package_roots(meta_package_dir)
+
+    assert roots == [
+        meta_package_dir / "pkg_a",
+        meta_package_dir / "pkg_b",
+    ]
+
+
+def test_collect_version_checks_meta_package(meta_package_dir):
+    """Test version checks are collected from nested package roots."""
+    checks = release.collect_version_checks(meta_package_dir)
+    check_paths = {check.file_path for check in checks}
+
+    assert meta_package_dir / "CHANGELOG.md" in check_paths
+    assert meta_package_dir / "CMakeLists.txt" not in check_paths
+    assert meta_package_dir / "pkg_a" / "package.xml" in check_paths
+    assert meta_package_dir / "pkg_a" / "CMakeLists.txt" in check_paths
+    assert meta_package_dir / "pkg_b" / "package.xml" in check_paths
+    assert meta_package_dir / "pkg_b" / "CMakeLists.txt" in check_paths
+
+
 def test_show_version_diff_capture_output():
     """Test show_version_diff produces output."""
     string_io = StringIO()
@@ -1096,6 +1178,28 @@ def test_cli_check_version_short_output(project_dir, mocker, capsys):
     assert captured.out.strip() == "1.0.0"
 
 
+def test_cli_check_version_short_output_nested_packages_only(
+    nested_packages_only_dir, mocker, capsys
+):
+    """Test CLI --check-version works for repositories with only nested packages."""
+    mocker.patch(
+        "sys.argv",
+        [
+            "release.py",
+            "--root",
+            str(nested_packages_only_dir),
+            "--check-version",
+            "--short",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        release.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "1.0.0"
+
+
 def test_cli_list_files(project_dir, mocker, capsys):
     """Test CLI --list-files."""
     mocker.patch("sys.argv", ["release.py", "--root", str(project_dir), "--list-files"])
@@ -1149,6 +1253,29 @@ def test_cli_update_version(project_dir, mocker, capsys):
     # Verify files were updated
     xml_content = (project_dir / "package.xml").read_text()
     assert "<version>2.3.4</version>" in xml_content
+
+
+def test_cli_update_version_meta_package(meta_package_dir, mocker):
+    """Test CLI --update-version updates all nested ROS packages."""
+    mocker.patch(
+        "sys.argv",
+        ["release.py", "--root", str(meta_package_dir), "--update-version", "2.3.4"],
+    )
+
+    try:
+        release.main()
+    except SystemExit as e:
+        assert e.code == 0
+
+    for package_name in ("pkg_a", "pkg_b"):
+        package_xml = (meta_package_dir / package_name / "package.xml").read_text()
+        cmake_lists = (meta_package_dir / package_name / "CMakeLists.txt").read_text()
+
+        assert "<version>2.3.4</version>" in package_xml
+        assert "VERSION 2.3.4" in cmake_lists
+
+    changelog_content = (meta_package_dir / "CHANGELOG.md").read_text()
+    assert "## [2.3.4] - " in changelog_content
 
 
 def test_cli_update_version_invalid_semver(project_dir, mocker, capsys):
