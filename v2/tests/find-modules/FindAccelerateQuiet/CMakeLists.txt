@@ -3,12 +3,10 @@ project(FindAccelerateQuietTest LANGUAGES NONE)
 
 find_package(jrl-cmakemodules 1.2.0 CONFIG REQUIRED)
 
-set(CMAKE_FIND_USE_CMAKE_PATH FALSE)
-set(CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH FALSE)
-set(CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH FALSE)
-set(CMAKE_FIND_USE_CMAKE_SYSTEM_PATH FALSE)
-set(CMAKE_FIND_USE_PACKAGE_REGISTRY FALSE)
-set(CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY FALSE)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    message(STATUS "Accelerate is only available on macOS, skipping test")
+    return()
+endif()
 
 jrl_find_package(Accelerate QUIET)
 
