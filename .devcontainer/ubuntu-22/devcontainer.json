@@ -1,0 +1,25 @@
+{
+  "name": "Ubuntu 22.04",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "USERNAME": "${localEnv:USER}"
+    }
+  },
+  "remoteUser": "${localEnv:USER}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "workspaceFolder": "/workspace",
+  "postCreateCommand": "pixi install",
+  "mounts": [
+    "source=${localEnv:HOME}/.gitconfig,target=/home/${localEnv:USER}/.gitconfig,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.ssh,target=/home/${localEnv:USER}/.ssh,type=bind,readonly"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools"
+      ]
+    }
+  }
+}
