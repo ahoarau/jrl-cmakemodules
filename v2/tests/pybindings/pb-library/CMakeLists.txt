@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 
+# Requires macOS >=10.14 SDK (fixes build issues on macos-15-intel)
+# ref: https://github.com/wjakob/nanobind_example/blob/master/pyproject.toml#L43
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum macOS version" FORCE)
+endif()
+
 project(
     pb-library
     VERSION 1.0.0
