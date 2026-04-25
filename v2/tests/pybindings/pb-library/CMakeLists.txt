@@ -1,11 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Requires macOS >=10.14 SDK (fixes build issues on macos-15-intel)
-# ref: https://github.com/wjakob/nanobind_example/blob/master/pyproject.toml#L43
-if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum macOS version" FORCE)
-endif()
-
 project(
     pb-library
     VERSION 1.0.0
@@ -13,6 +7,13 @@ project(
     HOMEPAGE_URL "https://example.com/pb-library"
     LANGUAGES CXX
 )
+
+# Requires macOS >=10.14 SDK (fixes build issues on macos-15-intel)
+# This needs to be after projec() to work.
+# ref: https://github.com/wjakob/nanobind_example/blob/master/pyproject.toml#L43
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum macOS version" FORCE)
+endif()
 
 find_package(jrl-cmakemodules 1.2.0 CONFIG REQUIRED)
 # Configure default binary and install directories, build type, etc.
