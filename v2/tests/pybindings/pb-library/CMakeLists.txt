@@ -9,11 +9,8 @@ project(
 )
 
 # Requires macOS >=10.14 SDK (fixes build issues on macos-15-intel)
-# This needs to be after projec() to work.
 # ref: https://github.com/wjakob/nanobind_example/blob/master/pyproject.toml#L43
-if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum macOS version" FORCE)
-endif()
+set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum macOS version" FORCE)
 
 find_package(jrl-cmakemodules 1.2.0 CONFIG REQUIRED)
 # Configure default binary and install directories, build type, etc.
