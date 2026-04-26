@@ -8,9 +8,9 @@ project(
     LANGUAGES CXX
 )
 
-# Requires macOS >=10.14 SDK (fixes build issues on macos-15-intel)
+# Requires macOS >=10.15 SDK (fixes build issues on macos-15-intel)
 # ref: https://github.com/wjakob/nanobind_example/blob/master/pyproject.toml#L43
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum macOS version" FORCE)
+set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS version" FORCE)
 
 find_package(jrl-cmakemodules 1.2.0 CONFIG REQUIRED)
 # Configure default binary and install directories, build type, etc.
