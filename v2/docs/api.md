@@ -273,6 +273,41 @@ jrl_configure_uninstall_target()
 jrl_configure_uninstall_target()
 # And then cmake --build . --target uninstall
 ```
+# `jrl_configure_dist_targets`
+
+```cpp
+jrl_configure_dist_targets()
+```
+
+**Type:** function
+
+
+### Description
+  Add `distcheck` and `distclean` targets that validate and clean a source distribution.
+  Works on all platforms (Linux, macOS, Windows).
+
+  `distcheck` expects a pre-extracted source directory at
+  `<CMAKE_BINARY_DIR>/<PROJECT_NAME>-<PROJECT_VERSION>/`, created by
+  `jrl_release.py --dist --build-dir <binary_dir>`.  It then performs a
+  **fresh** (no cached CMakeCache.txt) out-of-source configure, build, test,
+  install and uninstall cycle and verifies that the uninstall target removes
+  every installed file. The distcheck logic is implemented as a cross-platform
+  CMake script (`distcheck_<PROJECT_NAME>.cmake`) generated in the binary directory.
+
+  `distclean` removes that source directory.
+
+  Both targets are aggregated under top-level `distcheck` / `distclean` targets
+  so they compose correctly in super-build setups.
+
+
+### Arguments
+  None
+
+
+### Example
+```cmake
+jrl_configure_dist_targets()
+```
 # `jrl_configure_defaults`
 
 ```cpp
