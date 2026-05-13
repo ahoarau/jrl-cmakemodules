@@ -9,7 +9,6 @@
 #     "tomlkit",
 #     "ruamel.yaml",
 #     "rich",
-#     "packaging",
 #     "GitPython",
 #     "cmake-parser",
 # ]
@@ -30,7 +29,7 @@ import json
 import subprocess
 import argparse
 from pathlib import Path
-from io import StringIO
+from io import BytesIO, StringIO
 from datetime import date
 from unittest.mock import Mock
 
@@ -45,6 +44,19 @@ import jrl_release as release
 # ============================================================================
 # FIXTURES
 # ============================================================================
+
+
+@pytest.fixture(autouse=True)
+def reset_release_console():
+    """Use a fresh console for each test.
+
+    Some CLI paths rebind the module-level console to stderr/stdout-aware streams.
+    Resetting it between tests keeps direct function tests deterministic.
+    """
+    original_console = release.console
+    release.console = Console()
+    yield
+    release.console = original_console
 
 
 @pytest.fixture
@@ -1322,6 +1334,738 @@ def test_list_version_files_display(project_dir):
         assert "pyproject.toml" in output
     finally:
         release.console = old_console
+
+
+# ============================================================================
+# TEST get_project_name
+# ============================================================================
+
+
+def test_get_project_name_from_cmake(tmp_path):
+    """Detects project name from CMakeLists.txt project() command."""
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.22)\nproject(my-awesome-lib VERSION 1.0.0)\n"
+    )
+    assert release.get_project_name(tmp_path) == "my-awesome-lib"
+
+
+def test_get_project_name_from_cmake_multiline(tmp_path):
+    """Detects project name from a multiline project() command."""
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.22)\nproject(\n  my-lib\n  VERSION 1.0.0\n)\n"
+    )
+    assert release.get_project_name(tmp_path) == "my-lib"
+
+
+def test_get_project_name_from_cmake_variable(tmp_path):
+    """Detects project name when project() uses a variable defined above."""
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.22)\n"
+        'set(PROJECT_NAME_INPUT "my-variable-lib")\n'
+        "project(${PROJECT_NAME_INPUT} VERSION 1.0.0)\n"
+    )
+    assert release.get_project_name(tmp_path) == "my-variable-lib"
+
+
+def test_get_project_name_from_cmake_nested_variable(tmp_path):
+    """Resolves simple chains of variables before project()."""
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.22)\n"
+        'set(BASE_NAME "nested-lib")\n'
+        'set(PROJECT_NAME_INPUT "${BASE_NAME}")\n'
+        "project(${PROJECT_NAME_INPUT} VERSION 1.0.0)\n"
+    )
+    assert release.get_project_name(tmp_path) == "nested-lib"
+
+
+def test_get_project_name_prefers_build_dir_cache(tmp_path):
+    """A configured build dir is the most reliable project-name source."""
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "CMakeCache.txt").write_text(
+        "//Project name\nCMAKE_PROJECT_NAME:STATIC=cache-project\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "CMakeLists.txt").write_text(
+        "project(source-project VERSION 1.0.0)\n",
+        encoding="utf-8",
+    )
+    assert release.get_project_name(tmp_path, build_dir) == "cache-project"
+
+
+def test_get_project_name_from_cmake_unresolved_variable_falls_back(tmp_path):
+    """Falls back to explicit secondary metadata when CMakeLists.txt is unresolved."""
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.22)\n"
+        "project(${PROJECT_NAME_INPUT} VERSION 1.0.0)\n"
+    )
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "pixi-fallback"\nversion = "0.1.0"\n'
+    )
+    assert release.get_project_name(tmp_path) == "pixi-fallback"
+
+
+def test_get_project_name_from_pixi_toml(tmp_path):
+    """Falls back to pixi.toml workspace.name when no CMakeLists.txt exists."""
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "pixi-project"\nversion = "0.1.0"\n'
+    )
+    assert release.get_project_name(tmp_path) == "pixi-project"
+
+
+def test_get_project_name_from_pyproject_toml(tmp_path):
+    """Falls back to pyproject.toml project.name when no CMakeLists.txt or pixi.toml exist."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "py-project"\nversion = "0.1.0"\n'
+    )
+    assert release.get_project_name(tmp_path) == "py-project"
+
+
+def test_get_project_name_raises_with_clear_message_when_no_sources_exist(tmp_path):
+    """Raises a user-facing error instead of guessing from the directory name."""
+    with pytest.raises(
+        ValueError, match="Could not determine the project name"
+    ) as exc_info:
+        release.get_project_name(tmp_path)
+
+    error_message = str(exc_info.value)
+    assert "CMakeLists.txt: file does not exist" in error_message
+    assert "pixi.toml: file does not exist" in error_message
+    assert "pyproject.toml: file does not exist" in error_message
+    assert "Provide --project-name explicitly" in error_message
+
+
+# ============================================================================
+# TEST _git_ls_files / _git_submodule_paths (mocked)
+# ============================================================================
+
+
+def test_git_ls_files_returns_tracked_files(mocker):
+    mocker.patch("shutil.which", return_value="git")
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = mocker.Mock(
+        stdout="CMakeLists.txt\nsrc/lib.cpp\n", returncode=0
+    )
+    files = release._git_ls_files(Path("/fake/repo"))
+    assert files == ["CMakeLists.txt", "src/lib.cpp"]
+
+
+def test_git_submodule_paths_no_gitmodules(tmp_path):
+    """Returns empty list when .gitmodules does not exist."""
+    assert release._git_submodule_paths(tmp_path) == []
+
+
+def test_git_submodule_paths_parses_paths(mocker, tmp_path):
+    """Parses submodule paths from .gitmodules via git config."""
+    (tmp_path / ".gitmodules").write_text("[submodule]\n  path = third_party/eigen\n")
+    mocker.patch("shutil.which", return_value="git")
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = mocker.Mock(
+        stdout="submodule.third_party/eigen.path third_party/eigen\n",
+        returncode=0,
+    )
+    paths = release._git_submodule_paths(tmp_path)
+    assert paths == ["third_party/eigen"]
+
+
+def test_git_submodule_paths_git_config_fails(mocker, tmp_path):
+    """Returns empty list when git config returns non-zero exit code."""
+    (tmp_path / ".gitmodules").write_text("[submodule]\n  path = sub\n")
+    mocker.patch("shutil.which", return_value="git")
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = mocker.Mock(stdout="", returncode=1)
+    assert release._git_submodule_paths(tmp_path) == []
+
+
+# ============================================================================
+# TEST create_dist_tarball (integration with real git repo)
+# ============================================================================
+
+
+def _init_git_repo(repo_dir: Path) -> None:
+    """Initialize a git repository with deterministic test identity."""
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Create a minimal real git repo with one tracked file."""
+    _init_git_repo(tmp_path)
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.22)\nproject(test-project VERSION 1.0.0)\n"
+    )
+    (tmp_path / "README.md").write_text("# test-project\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial commit"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def minimal_release_project(tmp_path):
+    """Create a real minimal project that can complete dist/distcheck/distclean."""
+    _init_git_repo(tmp_path)
+
+    repo_root = Path(__file__).resolve().parents[2]
+    jrl_modules_dir = (repo_root / "v2" / "modules").as_posix()
+
+    (tmp_path / "README.md").write_text("# mini-release-project\n", encoding="utf-8")
+    (tmp_path / "package.xml").write_text(
+        """<?xml version=\"1.0\"?>
+<package format=\"2\">
+  <name>mini-release-project</name>
+  <version>1.0.0</version>
+  <description>Minimal release test project</description>
+</package>
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = \"mini-release-project\"
+version = \"1.0.0\"
+description = \"Minimal release test project\"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pixi.toml").write_text(
+        """[workspace]
+name = \"mini-release-project\"
+version = \"1.0.0\"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "CITATION.cff").write_text(
+        """cff-version: 1.2.0
+title: \"mini-release-project\"
+version: 1.0.0
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "CHANGELOG.md").write_text(
+        """# Changelog
+
+## [Unreleased]
+
+## [1.0.0] - 2024-01-01
+
+- Initial release
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "CMakeLists.txt").write_text(
+        f"""cmake_minimum_required(VERSION 3.22)
+project(mini-release-project VERSION 1.0.0 LANGUAGES NONE)
+
+list(PREPEND CMAKE_MODULE_PATH \"{jrl_modules_dir}\")
+include(jrl)
+
+jrl_configure_defaults()
+jrl_include_ctest()
+
+add_test(NAME smoke COMMAND ${{CMAKE_COMMAND}} -E true)
+install(FILES README.md DESTINATION share/${{PROJECT_NAME}})
+""",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial commit"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    return tmp_path
+
+
+def test_create_dist_tarball_creates_file(git_repo, tmp_path):
+    """create_dist_tarball produces a .tar.gz at the expected path."""
+    output_dir = tmp_path / "dist_out"
+    tarball = release.create_dist_tarball(git_repo, "test-project", "1.2.3", output_dir)
+
+    assert tarball.exists()
+    assert tarball.name == "test-project-1.2.3.tar.gz"
+
+
+def test_create_dist_tarball_contents(git_repo, tmp_path):
+    """Tarball contains tracked files under the versioned prefix."""
+    import tarfile as tf
+
+    output_dir = tmp_path / "dist_out"
+    tarball = release.create_dist_tarball(git_repo, "test-project", "1.2.3", output_dir)
+
+    with tf.open(str(tarball), "r:gz") as tar:
+        names = tar.getnames()
+
+    assert any(n.startswith("test-project-1.2.3/") for n in names)
+    assert "test-project-1.2.3/CMakeLists.txt" in names
+    assert "test-project-1.2.3/README.md" in names
+
+
+def test_create_dist_tarball_no_untracked_files(git_repo, tmp_path):
+    """Untracked files are NOT included in the tarball."""
+    import tarfile as tf
+
+    (git_repo / "untracked.txt").write_text("not tracked")
+
+    output_dir = tmp_path / "dist_out"
+    tarball = release.create_dist_tarball(git_repo, "test-project", "1.2.3", output_dir)
+
+    with tf.open(str(tarball), "r:gz") as tar:
+        names = tar.getnames()
+
+    assert "test-project-1.2.3/untracked.txt" not in names
+
+
+def test_create_dist_tarball_rejects_empty_project_name(git_repo, tmp_path):
+    """Project names must be explicit and non-empty when creating a tarball."""
+    with pytest.raises(ValueError, match="Project name must not be empty"):
+        release.create_dist_tarball(git_repo, "   ", "1.2.3", tmp_path / "dist_out")
+
+
+# ============================================================================
+# TEST extract_dist_tarball
+# ============================================================================
+
+
+def test_extract_dist_tarball_roundtrip(git_repo, tmp_path):
+    """Extracted directory contains expected files."""
+    output_dir = tmp_path / "dist_out"
+    tarball = release.create_dist_tarball(git_repo, "test-project", "1.2.3", output_dir)
+
+    extract_dir = tmp_path / "extracted"
+    extracted = release.extract_dist_tarball(tarball, extract_dir)
+
+    assert extracted.is_dir()
+    assert extracted.name == "test-project-1.2.3"
+    assert (extracted / "CMakeLists.txt").exists()
+    assert (extracted / "README.md").exists()
+
+
+def test_extract_dist_tarball_rejects_unsafe_entries(tmp_path):
+    """extract_dist_tarball raises ValueError for path-traversal entries."""
+    import tarfile as tf
+
+    bad_tarball = tmp_path / "bad.tar.gz"
+    with tf.open(str(bad_tarball), "w:gz") as tar:
+        info = tf.TarInfo(name="../etc/passwd")
+        info.size = 0
+        tar.addfile(info)
+
+    with pytest.raises(ValueError, match="Unsafe tarball entry"):
+        release.extract_dist_tarball(bad_tarball, tmp_path / "out")
+
+
+def test_extract_dist_tarball_rejects_unsafe_link_target(tmp_path):
+    """Symlink and hardlink targets must stay inside the archive root."""
+    import tarfile as tf
+
+    bad_tarball = tmp_path / "bad-link.tar.gz"
+    with tf.open(str(bad_tarball), "w:gz") as tar:
+        info = tf.TarInfo(name="pkg-1.2.3/link")
+        info.type = tf.SYMTYPE
+        info.linkname = "../outside"
+        tar.addfile(info)
+
+    with pytest.raises(ValueError, match="Unsafe tarball link target"):
+        release.extract_dist_tarball(bad_tarball, tmp_path / "out")
+
+
+def test_extract_dist_tarball_rejects_multiple_top_level_entries(tmp_path):
+    """Distributions must unpack into a single versioned directory."""
+    import tarfile as tf
+
+    bad_tarball = tmp_path / "bad-layout.tar.gz"
+    with tf.open(str(bad_tarball), "w:gz") as tar:
+        for name in ["pkg-a/README.md", "pkg-b/README.md"]:
+            data = b"doc"
+            info = tf.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, BytesIO(data))
+
+    with pytest.raises(ValueError, match="single top-level directory"):
+        release.extract_dist_tarball(bad_tarball, tmp_path / "out")
+
+
+# ============================================================================
+# TEST run_cmake_build_target (mocked)
+# ============================================================================
+
+
+def test_run_cmake_build_target_success(mocker, tmp_path):
+    mocker.patch("shutil.which", return_value="cmake")
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = mocker.Mock(returncode=0)
+
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+
+    release.run_cmake_build_target(build_dir, "distcheck")
+
+    mock_run.assert_called_once()
+    args = mock_run.call_args[0][0]
+    assert "cmake" in args
+    assert "--target" in args
+    assert "distcheck" in args
+
+
+def test_run_cmake_build_target_failure(mocker, tmp_path):
+    mocker.patch("shutil.which", return_value="cmake")
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = mocker.Mock(returncode=1)
+
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+
+    with pytest.raises(RuntimeError, match="distcheck"):
+        release.run_cmake_build_target(build_dir, "distcheck")
+
+
+def test_run_cmake_build_target_requires_existing_build_dir():
+    with pytest.raises(RuntimeError, match="does not exist"):
+        release.run_cmake_build_target(
+            Path("/definitely/missing/build-dir"), "distcheck"
+        )
+
+
+def test_run_cmake_configure_success(mocker, tmp_path):
+    mocker.patch("shutil.which", return_value="cmake")
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = Mock(returncode=0)
+
+    source_dir = tmp_path / "src"
+    build_dir = tmp_path / "build"
+
+    release.run_cmake_configure(source_dir, build_dir)
+
+    mock_run.assert_called_once_with(
+        ["cmake", "-S", str(source_dir), "-B", str(build_dir)]
+    )
+
+
+def test_run_cmake_configure_failure(mocker, tmp_path):
+    mocker.patch("shutil.which", return_value="cmake")
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = Mock(returncode=1)
+
+    with pytest.raises(RuntimeError, match="configure failed"):
+        release.run_cmake_configure(tmp_path / "src", tmp_path / "build")
+
+
+# ============================================================================
+# TEST CLI -- dist / distcheck / distclean (mocked)
+# ============================================================================
+
+
+def test_cli_dist_requires_build_dir(project_dir, mocker, capsys):
+    """--dist without --build-dir exits with error."""
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(project_dir),
+            "--update-version",
+            "2.0.0",
+            "--dist",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        release.main()
+    assert exc_info.value.code == 1
+
+
+def test_cli_distcheck_requires_build_dir(project_dir, mocker, capsys):
+    """--distcheck without --build-dir exits with error."""
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(project_dir),
+            "--update-version",
+            "2.0.0",
+            "--distcheck",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        release.main()
+    assert exc_info.value.code == 1
+
+
+def test_cli_dist_incompatible_with_check_version(tmp_path, mocker, capsys):
+    """--dist is rejected with --check-version."""
+    (tmp_path / "package.xml").write_text("<version>1.0.0</version>")
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(tmp_path),
+            "--check-version",
+            "--dist",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        release.main()
+    assert exc_info.value.code == 1
+
+
+def test_cli_dist_calls_create_and_extract(project_dir, mocker, tmp_path):
+    """--dist invokes create_dist_tarball and extract_dist_tarball."""
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+
+    mock_create = mocker.patch("jrl_release.create_dist_tarball")
+    fake_tarball = tmp_path / "proj-2.0.0.tar.gz"
+    fake_tarball.write_bytes(b"")
+    mock_create.return_value = fake_tarball
+
+    mock_extract = mocker.patch("jrl_release.extract_dist_tarball")
+    mock_extract.return_value = build_dir / "proj-2.0.0"
+
+    mock_subprocess_run = mocker.patch("subprocess.run")
+    mock_subprocess_run.return_value = mocker.Mock(returncode=0)
+
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(project_dir),
+            "--update-version",
+            "2.0.0",
+            "--dist",
+            "--build-dir",
+            str(build_dir),
+            "--project-name",
+            "proj",
+        ],
+    )
+    release.main()
+
+    mock_create.assert_called_once_with(project_dir, "proj", "2.0.0", build_dir)
+    mock_extract.assert_called_once_with(fake_tarball, build_dir)
+
+
+def test_cli_distcheck_calls_cmake_build(project_dir, mocker, tmp_path):
+    """--distcheck calls run_cmake_build_target with 'distcheck'."""
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+
+    mocker.patch(
+        "jrl_release.create_dist_tarball", return_value=tmp_path / "p-2.0.0.tar.gz"
+    )
+    mocker.patch("jrl_release.extract_dist_tarball", return_value=build_dir / "p-2.0.0")
+
+    mock_cmake = mocker.patch("jrl_release.run_cmake_build_target")
+    mocker.patch("subprocess.run", return_value=mocker.Mock(returncode=0))
+
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(project_dir),
+            "--update-version",
+            "2.0.0",
+            "--dist",
+            "--distcheck",
+            "--build-dir",
+            str(build_dir),
+            "--project-name",
+            "p",
+        ],
+    )
+    release.main()
+
+    targets = [call.args[1] for call in mock_cmake.call_args_list]
+    assert "distcheck" in targets
+
+
+def test_cli_distclean_calls_cmake_build(project_dir, mocker, tmp_path):
+    """--distclean calls run_cmake_build_target with 'distclean'."""
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+
+    mocker.patch(
+        "jrl_release.create_dist_tarball", return_value=tmp_path / "p-2.0.0.tar.gz"
+    )
+    mocker.patch("jrl_release.extract_dist_tarball", return_value=build_dir / "p-2.0.0")
+    mock_cmake = mocker.patch("jrl_release.run_cmake_build_target")
+    mocker.patch("subprocess.run", return_value=mocker.Mock(returncode=0))
+
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(project_dir),
+            "--update-version",
+            "2.0.0",
+            "--dist",
+            "--distcheck",
+            "--distclean",
+            "--build-dir",
+            str(build_dir),
+            "--project-name",
+            "p",
+        ],
+    )
+    release.main()
+
+    targets = [call.args[1] for call in mock_cmake.call_args_list]
+    assert "distcheck" in targets
+    assert "distclean" in targets
+
+
+def test_cli_distcheck_failure_rolls_back_tag(project_dir, mocker, tmp_path, capsys):
+    """When distcheck fails the git tag is deleted."""
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+
+    mocker.patch(
+        "jrl_release.create_dist_tarball", return_value=tmp_path / "p-2.0.0.tar.gz"
+    )
+    mocker.patch("jrl_release.extract_dist_tarball", return_value=build_dir / "p-2.0.0")
+    mocker.patch(
+        "jrl_release.run_cmake_build_target",
+        side_effect=RuntimeError("distcheck failed"),
+    )
+    mocker.patch("subprocess.run", return_value=mocker.Mock(returncode=0))
+
+    mock_git = mocker.patch("jrl_release.run_git_command")
+    # rev-parse --git-dir (tag check), rev-parse v2.0.0 (tag not exist), tag -a, tag -d rollback
+    mock_git.side_effect = [
+        (True, ""),  # rev-parse --git-dir
+        (False, ""),  # rev-parse v2.0.0 (doesn't exist)
+        (True, ""),  # tag -a v2.0.0
+        (True, ""),  # tag -d v2.0.0  (rollback)
+    ]
+
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(project_dir),
+            "--update-version",
+            "2.0.0",
+            "--dist",
+            "--distcheck",
+            "--git-tag",
+            "--confirm",
+            "--build-dir",
+            str(build_dir),
+            "--project-name",
+            "p",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        release.main()
+
+    assert exc_info.value.code == 1
+    # Verify tag -d was called
+    delete_calls = [
+        c
+        for c in mock_git.call_args_list
+        if c.args[0][0] == "tag" and "-d" in c.args[0]
+    ]
+    assert len(delete_calls) == 1
+
+
+def test_cli_dist_dry_run_shows_plan(project_dir, mocker, tmp_path, capsys):
+    """--dry-run with --dist shows planned commands without executing them."""
+    build_dir = tmp_path / "build"
+
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(project_dir),
+            "--update-version",
+            "2.0.0",
+            "--dry-run",
+            "--dist",
+            "--distcheck",
+            "--distclean",
+            "--build-dir",
+            str(build_dir),
+            "--project-name",
+            "my-proj",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        release.main()
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    assert "distcheck" in captured.out
+    assert "distclean" in captured.out
+    # Files must NOT be modified
+    xml_content = (project_dir / "package.xml").read_text()
+    assert "<version>1.0.0</version>" in xml_content
+
+
+def test_cli_dist_end_to_end_real_project(minimal_release_project, mocker):
+    """Run the real release flow with dist, distcheck, and distclean."""
+    build_dir = minimal_release_project / "build"
+    tarball = build_dir / "mini-release-project-1.0.1.tar.gz"
+    extracted_srcdir = build_dir / "mini-release-project-1.0.1"
+
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(minimal_release_project),
+            "--update-version",
+            "1.0.1",
+            "--dist",
+            "--distcheck",
+            "--distclean",
+            "--build-dir",
+            str(build_dir),
+            "--project-name",
+            "mini-release-project",
+            "--confirm",
+        ],
+    )
+
+    release.main()
+
+    assert tarball.exists()
+    assert not extracted_srcdir.exists()
+    assert "<version>1.0.1</version>" in (
+        minimal_release_project / "package.xml"
+    ).read_text(encoding="utf-8")
+    assert 'version = "1.0.1"' in (
+        minimal_release_project / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    assert 'version = "1.0.1"' in (minimal_release_project / "pixi.toml").read_text(
+        encoding="utf-8"
+    )
+    assert "## [1.0.1] - " in (minimal_release_project / "CHANGELOG.md").read_text(
+        encoding="utf-8"
+    )
 
 
 # ============================================================================

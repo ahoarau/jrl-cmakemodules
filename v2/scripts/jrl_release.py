@@ -56,6 +56,11 @@ uv run --no-project jrl_release.py --bump patch --git-commit --git-tag
 | `--git-commit [MSG]` | Commit changes. Optional message (`{version}` placeholder). |
 | `--git-tag [NAME]` | Create a tag. Optional name (`{version}` placeholder). |
 | `--git-tag-message <MSG>` | Tag annotation (`{version}` placeholder). |
+| `--dist` | Create a source tarball after version update. |
+| `--distcheck` | Run cmake distcheck target (requires `--build-dir`). |
+| `--distclean` | Run cmake distclean target (requires `--build-dir`). |
+| `--build-dir <PATH>` | CMake binary directory (required for dist steps). |
+| `--project-name <NAME>` | Project name for the tarball (auto-detected if omitted). |
 
 **Git defaults**: commit `chore: bump version to {version}`, tag `v{version}`, tag message `Release version {version}`.
 
@@ -82,7 +87,8 @@ import json
 import subprocess
 import shutil
 import tempfile
-from pathlib import Path
+import tarfile as tf
+from pathlib import Path, PurePosixPath
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple, Dict
 
@@ -406,6 +412,19 @@ class ChangelogVersionExtractor(VersionExtractor):
 def validate_semver(version: str) -> str:
     try:
         parsed = parse_version(version)
+        if str(parsed) != version.strip():
+            raise InvalidVersion(version)
+        # Require strict X.Y.Z (no pre/post/dev/local segments)
+        if (
+            parsed.is_prerelease
+            or parsed.is_postrelease
+            or parsed.is_devrelease
+            or parsed.local
+        ):
+            raise InvalidVersion(version)
+        parts = str(parsed).split(".")
+        if len(parts) != 3:
+            raise InvalidVersion(version)
         return str(parsed)
     except InvalidVersion:
         raise argparse.ArgumentTypeError(
@@ -774,6 +793,400 @@ def update_pixi_lock(root_dir: Path, dry_run: bool = False) -> Optional[str]:
     )
 
     return str(pixi_lock_path)
+
+
+def _require_command(command_name: str) -> str:
+    command_path = shutil.which(command_name)
+    if command_path is None:
+        raise RuntimeError(f"Required command '{command_name}' was not found in PATH.")
+    return command_path
+
+
+def _validate_archive_path(path_value: str, label: str) -> PurePosixPath:
+    if not path_value:
+        raise ValueError(f"Unsafe tarball {label}: empty path is not allowed.")
+    if "\\" in path_value:
+        raise ValueError(
+            f"Unsafe tarball {label}: backslashes are not allowed: {path_value}"
+        )
+    if re.match(r"^[A-Za-z]:", path_value):
+        raise ValueError(
+            f"Unsafe tarball {label}: drive-qualified paths are not allowed: {path_value}"
+        )
+
+    pure_path = PurePosixPath(path_value)
+    if pure_path.is_absolute() or ".." in pure_path.parts:
+        raise ValueError(f"Unsafe tarball {label}: {path_value}")
+    return pure_path
+
+
+def _strip_cmake_quotes(value: str) -> str:
+    """Remove matching single or double quotes around a CMake token."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
+
+
+def _parse_cmake_elements(content: str) -> List[object]:
+    """Parse CMake content into AST elements."""
+    return list(cmake_parser.parse_tree(content))
+
+
+def _get_cmake_command_name(node) -> Optional[str]:
+    """Return a normalized command name from a cmake-parser node."""
+    # Generic Command nodes expose .identifier; typed nodes (Set, If, …) use the class name
+    command_name = getattr(node, "identifier", None)
+    if command_name is None:
+        node_type_name = type(node).__name__
+        if node_type_name != "Command":
+            command_name = node_type_name
+    if command_name is None:
+        return None
+    return str(command_name).lower()
+
+
+def _get_cmake_command_args(node) -> List[str]:
+    """Extract raw argument values from a cmake-parser command node."""
+    args = []
+    for item in getattr(node, "args", []):
+        token_value = getattr(item, "value", None)
+        if token_value is not None:
+            args.append(str(token_value))
+    return args
+
+
+def _resolve_cmake_variable_token(
+    token: str, variables: Dict[str, str], max_depth: int = 10
+) -> Optional[str]:
+    """Resolve a simple ``${VAR}`` token using variables defined earlier."""
+    resolved = _strip_cmake_quotes(token).strip()
+    for _ in range(max_depth):
+        match = re.fullmatch(r"\$\{([^}]+)\}", resolved)
+        if not match:
+            return resolved or None
+        variable_name = match.group(1)
+        if variable_name not in variables:
+            return None
+        resolved = _strip_cmake_quotes(variables[variable_name]).strip()
+    return None
+
+
+def _get_project_name_from_cmake(cmake_lists: Path) -> str:
+    """Detect project name from CMakeLists.txt using cmake-parser only."""
+    content = cmake_lists.read_text(encoding="utf-8")
+    variables: Dict[str, str] = {}
+
+    for node in _parse_cmake_elements(content):
+        command_name = _get_cmake_command_name(node)
+        if not command_name:
+            continue
+
+        args = _get_cmake_command_args(node)
+        if not args:
+            continue
+
+        if command_name == "set":
+            if len(args) >= 2:
+                var_name = _strip_cmake_quotes(args[0]).strip()
+                if var_name:
+                    variables[var_name] = args[1]
+            continue
+
+        if command_name == "project":
+            project_name = _resolve_cmake_variable_token(args[0], variables)
+            if project_name:
+                return project_name
+            raise ValueError(
+                "CMakeLists.txt contains a project() call, but its first argument "
+                "could not be resolved. Only literal names and simple ${VAR} references "
+                "defined earlier with set(VAR value) are supported."
+            )
+
+    raise ValueError(
+        "CMakeLists.txt does not contain a readable project() declaration."
+    )
+
+
+def _get_project_name_from_build_dir(build_dir: Path) -> str:
+    """Read the configured project name from a populated CMake build directory."""
+    cmake_cache = build_dir / "CMakeCache.txt"
+    if not cmake_cache.exists():
+        raise ValueError(f"{cmake_cache} does not exist.")
+
+    for line in cmake_cache.read_text(encoding="utf-8").splitlines():
+        if line.startswith("CMAKE_PROJECT_NAME:"):
+            _, _, value = line.partition("=")
+            project_name = value.strip()
+            if project_name:
+                return project_name
+            raise ValueError(
+                f"{cmake_cache} contains an empty CMAKE_PROJECT_NAME entry."
+            )
+
+    raise ValueError(f"{cmake_cache} does not define CMAKE_PROJECT_NAME.")
+
+
+def _get_project_name_from_pixi_toml(pixi_toml: Path) -> str:
+    """Read project name from pixi.toml [workspace].name."""
+    with open(pixi_toml, "r", encoding="utf-8") as f:
+        data = tomlkit.load(f)
+    if "workspace" not in data or "name" not in data["workspace"]:
+        raise ValueError("pixi.toml does not define [workspace].name.")
+    project_name = str(data["workspace"]["name"]).strip()
+    if not project_name:
+        raise ValueError("pixi.toml defines an empty [workspace].name.")
+    return project_name
+
+
+def _get_project_name_from_pyproject_toml(pyproject_toml: Path) -> str:
+    """Read project name from pyproject.toml [project].name."""
+    with open(pyproject_toml, "r", encoding="utf-8") as f:
+        data = tomlkit.load(f)
+    if "project" not in data or "name" not in data["project"]:
+        raise ValueError("pyproject.toml does not define [project].name.")
+    project_name = str(data["project"]["name"]).strip()
+    if not project_name:
+        raise ValueError("pyproject.toml defines an empty [project].name.")
+    return project_name
+
+
+def get_project_name(root_dir: Path, build_dir: Optional[Path] = None) -> str:
+    """Determine the project name from explicit project metadata.
+
+    Tries in order:
+    1. ``CMAKE_PROJECT_NAME`` from ``<build_dir>/CMakeCache.txt`` (if build_dir given)
+    2. ``project(<name> ...)`` in CMakeLists.txt
+    3. ``[workspace] name`` in pixi.toml
+    4. ``[project] name`` in pyproject.toml
+    """
+    errors: List[str] = []
+    source_probes: List[Tuple[str, object]] = []
+
+    if build_dir is not None:
+        source_probes.append(
+            (
+                f"build dir {build_dir}",
+                lambda: _get_project_name_from_build_dir(build_dir),
+            )
+        )
+
+    def _load(path: Path, reader):
+        if not path.exists():
+            raise ValueError("file does not exist.")
+        return reader(path)
+
+    source_probes.extend(
+        [
+            (
+                "CMakeLists.txt",
+                lambda: _load(
+                    root_dir / "CMakeLists.txt", _get_project_name_from_cmake
+                ),
+            ),
+            (
+                "pixi.toml",
+                lambda: _load(root_dir / "pixi.toml", _get_project_name_from_pixi_toml),
+            ),
+            (
+                "pyproject.toml",
+                lambda: _load(
+                    root_dir / "pyproject.toml", _get_project_name_from_pyproject_toml
+                ),
+            ),
+        ]
+    )
+
+    for source_label, probe in source_probes:
+        try:
+            return probe()
+        except (OSError, ValueError) as exc:
+            errors.append(f"{source_label}: {exc}")
+
+    details = "\n".join(f"- {e}" for e in errors)
+    raise ValueError(
+        "Could not determine the project name from explicit metadata.\n"
+        "Tried the following sources:\n"
+        f"{details}\n"
+        "Provide --project-name explicitly, or configure the project so one of these sources is available."
+    )
+
+
+def _git_ls_files(repo_dir: Path) -> List[str]:
+    """Return the list of tracked files in *repo_dir* via ``git ls-files``."""
+    result = subprocess.run(
+        [
+            _require_command("git"),
+            "ls-files",
+            "--cached",
+            "--full-name",
+            "--no-empty-directory",
+        ],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [f.strip() for f in result.stdout.splitlines() if f.strip()]
+
+
+def _git_submodule_paths(repo_dir: Path) -> List[str]:
+    """Return relative submodule paths declared in *repo_dir*/.gitmodules."""
+    if not (repo_dir / ".gitmodules").exists():
+        return []
+    result = subprocess.run(
+        [
+            _require_command("git"),
+            "config",
+            "--file",
+            ".gitmodules",
+            "--get-regexp",
+            r"submodule\..*\.path",
+        ],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    paths = []
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            paths.append(parts[1].strip())
+    return paths
+
+
+def _add_repo_to_tar(tar, repo_dir: Path, prefix: str, rel_base: str = "") -> None:
+    """Recursively add all tracked files (and submodules) to an open tarfile."""
+    import os
+
+    for rel_path in _git_ls_files(repo_dir):
+        abs_path = repo_dir / rel_path
+        arcname = prefix + (rel_base + "/" if rel_base else "") + rel_path
+        if abs_path.is_symlink():
+            info = tf.TarInfo(name=arcname)
+            info.type = tf.SYMTYPE
+            info.linkname = os.readlink(str(abs_path))
+            tar.addfile(info)
+        elif abs_path.is_file():
+            tar.add(str(abs_path), arcname=arcname)
+
+    for sub_path in _git_submodule_paths(repo_dir):
+        sub_dir = repo_dir / sub_path
+        if sub_dir.is_dir():
+            sub_rel = (rel_base + "/" if rel_base else "") + sub_path
+            _add_repo_to_tar(tar, sub_dir, prefix, sub_rel)
+
+
+def create_dist_tarball(
+    source_dir: Path,
+    project_name: str,
+    version: str,
+    output_dir: Path,
+) -> Path:
+    """Create a ``<project_name>-<version>.tar.gz`` source tarball.
+
+    Uses ``git ls-files`` to collect tracked files and recurses into submodules
+    via ``.gitmodules``.
+
+    Returns the path to the created tarball.
+    """
+    if not source_dir.is_dir():
+        raise RuntimeError(f"Source directory does not exist: {source_dir}")
+    if not project_name.strip():
+        raise ValueError("Project name must not be empty.")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"{project_name}-{version}/"
+    tarball_path = output_dir / f"{project_name}-{version}.tar.gz"
+
+    console.print(
+        f"[{STYLE_INFO}]Creating source tarball {tarball_path.name}...[/{STYLE_INFO}]"
+    )
+
+    with tf.open(str(tarball_path), "w:gz") as tar:
+        _add_repo_to_tar(tar, source_dir, prefix)
+
+    size_kb = tarball_path.stat().st_size // 1024
+    console.print(
+        f"[{STYLE_SUCCESS}]✓ Created {tarball_path.name} ({size_kb} KB)[/{STYLE_SUCCESS}]"
+    )
+    return tarball_path
+
+
+def extract_dist_tarball(tarball_path: Path, dest_dir: Path) -> Path:
+    """Extract *tarball_path* into *dest_dir* and return the top-level extracted directory.
+
+    Raises ``ValueError`` for unsafe entries (absolute paths or ``..`` components).
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    with tf.open(str(tarball_path), "r:gz") as tar:
+        members = tar.getmembers()
+        if not members:
+            raise ValueError("Tarball is empty.")
+
+        top_dirs: set = set()
+        for member in members:
+            member_path = _validate_archive_path(member.name, "entry")
+            if not member_path.parts:
+                raise ValueError(f"Unsafe tarball entry: {member.name}")
+            top_dirs.add(member_path.parts[0])
+            if member.issym() or member.islnk():
+                _validate_archive_path(
+                    member.linkname, f"link target for {member.name}"
+                )
+
+        for member in members:
+            tar.extract(member, str(dest_dir))
+
+    if len(top_dirs) != 1:
+        raise ValueError(
+            f"Expected a single top-level directory in the tarball, got: {top_dirs}"
+        )
+    extracted = dest_dir / next(iter(top_dirs))
+    if not extracted.is_dir():
+        raise ValueError(
+            f"Expected extracted top-level directory to exist, got: {extracted}"
+        )
+    console.print(f"[{STYLE_SUCCESS}]✓ Extracted to {extracted}[/{STYLE_SUCCESS}]")
+    return extracted
+
+
+def run_cmake_configure(source_dir: Path, build_dir: Path) -> None:
+    """Run ``cmake -S <source_dir> -B <build_dir>`` with actionable errors."""
+    cmake_command = _require_command("cmake")
+    cmd = [cmake_command, "-S", str(source_dir), "-B", str(build_dir)]
+    console.print(f"[{STYLE_MUTED}]$ {' '.join(cmd)}[/{STYLE_MUTED}]")
+    try:
+        result = subprocess.run(cmd)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to run cmake configure command: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"cmake configure failed for build directory {build_dir} (exit code {result.returncode})"
+        )
+
+
+def run_cmake_build_target(build_dir: Path, target: str) -> None:
+    """Run ``cmake --build <build_dir> --target <target>``.
+
+    Raises ``RuntimeError`` on non-zero exit.
+    """
+    if not build_dir.is_dir():
+        raise RuntimeError(f"CMake build directory does not exist: {build_dir}")
+
+    cmake_command = _require_command("cmake")
+    cmd = [cmake_command, "--build", str(build_dir), "--target", target]
+    console.print(f"[{STYLE_MUTED}]$ {' '.join(cmd)}[/{STYLE_MUTED}]")
+    try:
+        result = subprocess.run(cmd)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to run cmake build command: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"cmake --build --target {target} failed (exit code {result.returncode})"
+        )
 
 
 def create_backups(file_paths: List[Path]) -> Dict[Path, Path]:
@@ -1145,6 +1558,35 @@ def main():
         help="Custom git tag message. Use {version} as placeholder for version number. Default: 'Release version {version}'",
     )
     parser.add_argument(
+        "--dist",
+        action="store_true",
+        help="Create a source tarball after version update.",
+    )
+    parser.add_argument(
+        "--distcheck",
+        action="store_true",
+        help="Run cmake --build --target distcheck after --dist (requires --build-dir).",
+    )
+    parser.add_argument(
+        "--distclean",
+        action="store_true",
+        help="Run cmake --build --target distclean after --distcheck (requires --build-dir).",
+    )
+    parser.add_argument(
+        "--build-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="CMake binary directory. Required for --dist, --distcheck, --distclean.",
+    )
+    parser.add_argument(
+        "--project-name",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Project name for the tarball. Auto-detected from CMakeLists.txt / pixi.toml / pyproject.toml if not provided.",
+    )
+    parser.add_argument(
         "--short",
         action="store_true",
         help="Output only the final version string.",
@@ -1185,6 +1627,14 @@ def main():
         console = Console(file=sys.stderr)
     else:
         console = Console()
+
+    if (args.dist or args.distcheck or args.distclean) and (
+        args.check_version or args.list_files
+    ):
+        console.print(
+            f"[{STYLE_ERROR}]--dist, --distcheck, --distclean are only valid with --bump or --update-version.[/{STYLE_ERROR}]"
+        )
+        sys.exit(1)
 
     if args.update_version:
         try:
@@ -1382,6 +1832,27 @@ def main():
             )
             git_lines.append(f"$ git tag -a {tag_name} -m '{tag_message}'")
 
+        if args.dist:
+            if not args.build_dir:
+                console.print(
+                    f"[{STYLE_ERROR}]--build-dir is required when using --dist.[/{STYLE_ERROR}]"
+                )
+                sys.exit(1)
+            try:
+                project_name = args.project_name or get_project_name(
+                    root_dir, args.build_dir
+                )
+            except ValueError as exc:
+                console.print(f"[{STYLE_ERROR}]{exc}[/{STYLE_ERROR}]")
+                sys.exit(1)
+            git_lines.append(
+                f"$ jrl_release.py --dist  →  {args.build_dir}/{project_name}-{target_version}.tar.gz"
+            )
+        if args.distcheck and args.build_dir:
+            git_lines.append(f"$ cmake --build {args.build_dir} --target distcheck")
+        if args.distclean and args.build_dir:
+            git_lines.append(f"$ cmake --build {args.build_dir} --target distclean")
+
         show_dry_run_panel(dry_run_rows, pixi_lock_would_update, git_lines)
         sys.exit(0)
     else:
@@ -1413,6 +1884,52 @@ def main():
                 custom_tag_name,
                 args.git_tag_message,
             )
+
+        # --- dist / distcheck / distclean ---
+        if args.dist or args.distcheck or args.distclean:
+            if not args.build_dir:
+                console.print(
+                    f"[{STYLE_ERROR}]--build-dir is required when using --dist, --distcheck, or --distclean.[/{STYLE_ERROR}]"
+                )
+                sys.exit(1)
+            try:
+                project_name = args.project_name or get_project_name(
+                    root_dir, args.build_dir
+                )
+            except ValueError as exc:
+                console.print(f"[{STYLE_ERROR}]{exc}[/{STYLE_ERROR}]")
+                sys.exit(1)
+
+            if args.dist:
+                tarball = create_dist_tarball(
+                    root_dir, project_name, target_version, args.build_dir
+                )
+                extract_dist_tarball(tarball, args.build_dir)
+                run_cmake_configure(root_dir, args.build_dir)
+
+            if args.distcheck:
+                try:
+                    run_cmake_build_target(args.build_dir, "distcheck")
+                except RuntimeError as exc:
+                    console.print(
+                        f"[{STYLE_ERROR_STRONG}]distcheck failed: {exc}[/{STYLE_ERROR_STRONG}]"
+                    )
+                    # Roll back the tag so the release can be retried
+                    if args.git_tag is not None:
+                        custom_tag_name = None if args.git_tag is True else args.git_tag
+                        tag_name = (
+                            custom_tag_name.format(version=target_version)
+                            if custom_tag_name
+                            else f"v{target_version}"
+                        )
+                        console.print(
+                            f"[{STYLE_WARNING}]Rolling back tag {tag_name}...[/{STYLE_WARNING}]"
+                        )
+                        run_git_command(["tag", "-d", tag_name], root_dir)
+                    sys.exit(1)
+
+            if args.distclean:
+                run_cmake_build_target(args.build_dir, "distclean")
 
 
 if __name__ == "__main__":
