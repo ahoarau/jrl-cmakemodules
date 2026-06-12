@@ -1,0 +1,4 @@
+[project]
+name = "test-pyproject-metadata"
+version = "0.1.0"
+description = "A minimal test for pyproject metadata"

@@ -69,6 +69,8 @@ pytest = "*"
 libmatio = "*"
 simde = "*"
 suitesparse = "*"
+tomlkit = "*"
+pyproject-metadata = "*"
 
 [feature.test.tasks]
 _configure = { cmd = [

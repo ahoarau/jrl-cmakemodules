@@ -24,6 +24,7 @@ test_v1_api = { cmd = "pixi run test", cwd = "v1_api" }
 test_fetchcontent = { cmd = "pixi run test", cwd = "fetchcontent" }
 test_exported_headers = { cmd = "pixi run test", cwd = "exported_headers" }
 test_header_visibility = { cmd = "pixi run test", cwd = "header_visibility" }
+test_pyproject_metadata = { cmd = "pixi run test", cwd = "pyproject_metadata" }
 
 test = { depends-on = [
     "test_find_modules",
@@ -44,6 +45,7 @@ test = { depends-on = [
     "test_fetchcontent",
     "test_exported_headers",
     "test_header_visibility",
+    "test_pyproject_metadata",
 ] }
 
 [package]

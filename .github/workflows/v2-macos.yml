@@ -33,6 +33,16 @@ jobs:
           # OpenMP gets found. Homebrew's CHOLMODConfig.cmake requires it via find_dependency(OpenMP).
           brew link --force --overwrite libomp
 
+      - name: Setup Python Virtual Environment
+        run: |
+          python3 -m venv --system-site-packages ${{ github.workspace }}/venv
+          echo "${{ github.workspace }}/venv/bin" >> $GITHUB_PATH
+
+      - name: Install Python dependencies (via pip)
+        run: |
+          pip install --upgrade pip
+          pip install tomlkit pyproject-metadata
+
       - name: Configure project
         run: cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DJRL_CMAKEMODULES_BUILD_TESTS=ON
 

@@ -42,7 +42,7 @@ jobs:
       - name: Install python dependencies (via pip)
         run: |
           pip install --upgrade pip
-          pip install nanobind pytest numpy
+          pip install nanobind pytest numpy tomlkit pyproject-metadata
 
       - name: Build Catch2 (Ubuntu 22.04 has Catch2 v2, we need v3)
         run: |
@@ -99,7 +99,7 @@ jobs:
       - name: Install python dependencies (via pip)
         run: |
           pip install --upgrade pip
-          pip install nanobind pytest numpy
+          pip install nanobind pytest numpy tomlkit pyproject-metadata
 
       - name: Configure project
         run: cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DJRL_CMAKEMODULES_BUILD_TESTS=ON
@@ -144,6 +144,8 @@ jobs:
             python-pytest \
             nanobind \
             python-numpy \
+            python-tomlkit \
+            python-pyproject-metadata \
             boost \
             boost-libs \
             eigen \
