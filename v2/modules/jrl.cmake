@@ -3480,13 +3480,20 @@ function(jrl_check_python_module module_name)
 
     jrl_python_get_interpreter(python)
 
+    if(arg_QUIET)
+        set(ERROR_QUIET "ERROR_QUIET")
+    else()
+        set(ERROR_QUIET "")
+    endif()
+
     execute_process(
         COMMAND
             ${python} -c
             "import ${module_name}; print(getattr(${module_name}, '__version__', ''), end='')"
         RESULT_VARIABLE module_found
         OUTPUT_VARIABLE module_version
-        ERROR_QUIET
+        ERROR_VARIABLE module_error
+        ${ERROR_QUIET}
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
 
@@ -3505,7 +3512,10 @@ function(jrl_check_python_module module_name)
     else()
         set(${module_name}_FOUND false PARENT_SCOPE)
         if(arg_REQUIRED)
-            message(FATAL_ERROR "Required Python module '${module_name}' not found.")
+            message(
+                FATAL_ERROR
+                "${python} \nRequired Python module '${module_name}' not found: \n${module_error}"
+            )
         elseif(NOT arg_QUIET)
             message(WARNING "Python module '${module_name}' not found.")
         endif()
@@ -3966,6 +3976,119 @@ function(jrl_boostpy_add_module name)
 
     python_add_library(${name} MODULE WITH_SOABI ${ARGN})
     target_link_libraries(${name} PRIVATE Boost::python)
+endfunction()
+
+#[============================================================================[
+# `jrl_generate_pyproject_metadata`
+
+```cpp
+jrl_generate_pyproject_metadata(
+    [OUTPUT_FILE <path>]
+    [PYPROJECT_TOML <path>]
+    [INSTALL_DESTINATION <dir>]
+)
+```
+
+**Type:** function
+
+
+### Description
+  Generate a PEP 643 `METADATA` file from a PEP 621 `pyproject.toml`.
+  Requires the `tomlkit` and `pyproject_metadata` Python modules.
+  With pixi, you can install them with: `pixi add tomlkit pyproject-metadata`.
+  ref. https://packaging.python.org/en/latest/specifications/core-metadata/
+
+### Arguments
+* `OUTPUT_FILE`: Path of the `METADATA` file to generate (default: `${CMAKE_CURRENT_BINARY_DIR}/generated/python/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info/METADATA`).
+* `PYPROJECT_TOML`: Path to the source `pyproject.toml` (default: `${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml`).
+* `INSTALL_DESTINATION`: Path to the installation directory for the generated `METADATA` file
+    (default: jrl_python_compute_install_dir(python_install_dir), `${python_install_dir}/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info/`).
+
+
+### Example
+Automated install:
+```cmake
+jrl_generate_pyproject_metadata()
+```
+
+Full control:
+```cmake
+jrl_python_compute_install_dir(python_install_dir)
+jrl_generate_pyproject_metadata(
+    OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info/METADATA
+    INSTALL_DESTINATION ${python_install_dir}/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info
+)
+```
+#]============================================================================]
+function(jrl_generate_pyproject_metadata)
+    set(options)
+    set(oneValueArgs PYPROJECT_TOML OUTPUT_FILE INSTALL_DESTINATION)
+    set(multiValueArgs)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    _jrl_check_no_unrecognized_arguments(arg)
+
+    if(arg_OUTPUT_FILE)
+        set(output_file ${arg_OUTPUT_FILE})
+    else()
+        _jrl_check_var_defined(PROJECT_NAME)
+        _jrl_check_var_defined(PROJECT_VERSION)
+        set(output_file
+            ${CMAKE_CURRENT_BINARY_DIR}/generated/python/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info/METADATA
+        )
+    endif()
+
+    if(arg_PYPROJECT_TOML)
+        set(pyproject_toml ${arg_PYPROJECT_TOML})
+    else()
+        set(pyproject_toml ${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml)
+    endif()
+
+    if(arg_INSTALL_DESTINATION)
+        set(install_destination ${arg_INSTALL_DESTINATION})
+    else()
+        jrl_python_compute_install_dir(python_install_dir)
+        set(install_destination
+            "${python_install_dir}/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info"
+        )
+    endif()
+
+    _jrl_check_file_exists(${pyproject_toml})
+
+    jrl_python_get_interpreter(python)
+    jrl_check_python_module(tomlkit REQUIRED)
+    jrl_check_python_module(pyproject_metadata REQUIRED)
+
+    execute_process(
+        COMMAND
+            ${python} -c
+            "
+from pathlib import Path
+from sys import argv
+import tomlkit
+from pyproject_metadata import StandardMetadata
+path = Path('${pyproject_toml}')
+data = tomlkit.parse(path.read_text(encoding='utf-8')).unwrap()
+metadata = StandardMetadata.from_pyproject(data, project_dir=path.parent)
+out = Path('${output_file}')
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(str(metadata.as_rfc822()), encoding='utf-8')
+            "
+        RESULT_VARIABLE result
+        ERROR_VARIABLE error
+    )
+
+    if(error)
+        message(
+            FATAL_ERROR
+            "Failed to generate PEP 643 metadata from '${pyproject_toml}': ${error}"
+        )
+    endif()
+
+    message(STATUS "Generated PEP 643 metadata: ${output_file}")
+
+    if(install_destination)
+        install(FILES ${output_file} DESTINATION ${install_destination})
+    endif()
 endfunction()
 
 #[============================================================================[

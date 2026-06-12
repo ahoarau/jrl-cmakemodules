@@ -1305,6 +1305,46 @@ jrl_boostpy_add_module(
 ```cmake
 jrl_boostpy_add_module(my_module module.cpp)
 ```
+# `jrl_generate_pyproject_metadata`
+
+```cpp
+jrl_generate_pyproject_metadata(
+    [OUTPUT_FILE <path>]
+    [PYPROJECT_TOML <path>]
+    [INSTALL_DESTINATION <dir>]
+)
+```
+
+**Type:** function
+
+
+### Description
+  Generate a PEP 643 `METADATA` file from a PEP 621 `pyproject.toml`.
+  Requires the `tomlkit` and `pyproject_metadata` Python modules.
+  With pixi, you can install them with: `pixi add tomlkit pyproject-metadata`.
+  ref. https://packaging.python.org/en/latest/specifications/core-metadata/
+
+### Arguments
+* `OUTPUT_FILE`: Path of the `METADATA` file to generate (default: `${CMAKE_CURRENT_BINARY_DIR}/generated/python/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info/METADATA`).
+* `PYPROJECT_TOML`: Path to the source `pyproject.toml` (default: `${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml`).
+* `INSTALL_DESTINATION`: Path to the installation directory for the generated `METADATA` file
+    (default: jrl_python_compute_install_dir(python_install_dir), `${python_install_dir}/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info/`).
+
+
+### Example
+Automated install:
+```cmake
+jrl_generate_pyproject_metadata()
+```
+
+Full control:
+```cmake
+jrl_python_compute_install_dir(python_install_dir)
+jrl_generate_pyproject_metadata(
+    OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info/METADATA
+    INSTALL_DESTINATION ${python_install_dir}/${PROJECT_NAME}-${PROJECT_VERSION}.dist-info
+)
+```
 # `jrl_boostpy_add_stubs`
 
 ```cpp
