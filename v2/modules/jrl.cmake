@@ -2754,6 +2754,11 @@ function(jrl_export_package)
             NAMESPACE ${PACKAGE_NAMESPACE}
             DESTINATION ${cmake_files_install_dir}/${component}
         )
+
+        # Check RPATH for target build-directory references
+        foreach(target ${targets})
+            _jrl_target_check_rpath(${target})
+        endforeach()
     endforeach()
 endfunction()
 
@@ -4512,6 +4517,188 @@ function(_jrl_generate_api_doc input_file output_file)
 
     message(DEBUG "Removing temporary file '${tmp_output_file}'")
     file(REMOVE ${tmp_output_file})
+endfunction()
+
+#[============================================================================[
+# `_jrl_target_check_rpath`
+#
+# ```cpp
+# _jrl_target_check_rpath(target)
+# ```
+#
+# **Type:** function
+#
+#
+# ### Description
+#   Register an install-time check for an exported target to verify that its installed
+#   RPATH does not contain references to the build directory.
+#
+#   This function dynamically generates a platform-specific check script
+#   (`check_rpath_apple.cmake` or `check_rpath_linux.cmake`) and adds an install(CODE)
+#   block to execute that script during target installation.
+#
+#
+# ### Arguments
+# * `target`: Target to check RPATH for.
+#
+#
+# ### Example
+# ```cmake
+# _jrl_target_check_rpath(my_target)
+# ```
+#]============================================================================]
+function(_jrl_target_check_rpath target)
+    if(NOT APPLE AND NOT UNIX)
+        return()
+    endif()
+
+    get_target_property(target_type ${target} TYPE)
+    if(target_type STREQUAL "EXECUTABLE")
+        set(install_dir "${CMAKE_INSTALL_BINDIR}")
+    elseif(target_type STREQUAL "SHARED_LIBRARY" OR target_type STREQUAL "MODULE_LIBRARY")
+        set(install_dir "${CMAKE_INSTALL_LIBDIR}")
+    else()
+        return()
+    endif()
+
+    if(APPLE)
+        set(script_file "${CMAKE_BINARY_DIR}/check_rpath_apple.cmake")
+        file(
+            CONFIGURE
+            OUTPUT "${script_file}"
+            CONTENT
+                [[
+# Check if the target path exists
+if(NOT EXISTS "${TARGET_PATH}")
+  message(STATUS "Binary ${TARGET_PATH} does not exist. Skipping RPATH check.")
+  return()
+endif()
+
+# We will collect all found RPATHs in this list
+set(rpaths "")
+
+find_program(OTOOL_PATH otool)
+if(OTOOL_PATH)
+  execute_process(
+    COMMAND ${OTOOL_PATH} -l ${TARGET_PATH}
+    OUTPUT_VARIABLE otool_out
+    ERROR_VARIABLE otool_err
+    RESULT_VARIABLE otool_res
+  )
+  if(otool_res EQUAL 0)
+    string(REPLACE "\n" ";" lines "${otool_out}")
+    set(grab_next FALSE)
+    foreach(line ${lines})
+      if(line MATCHES "cmd[ \t]+LC_RPATH")
+        set(grab_next TRUE)
+      elseif(grab_next AND line MATCHES "path[ \t]+")
+        string(REGEX REPLACE ".*path[ \t]+(.*) \\(offset.*" "\\1" rpath "${line}")
+        string(STRIP "${rpath}" rpath)
+        list(APPEND rpaths "${rpath}")
+        set(grab_next FALSE)
+      endif()
+    endforeach()
+  else()
+    message(STATUS "Failed to run otool: ${otool_err}")
+  endif()
+else()
+  message(STATUS "otool not found. Skipping RPATH check.")
+endif()
+
+# Check if any RPATH contains references to the build directory
+foreach(rpath ${rpaths})
+  cmake_path(IS_PREFIX BUILD_DIR "${rpath}" NORMALIZE is_subpath)
+  if(is_subpath)
+    message(SEND_ERROR "RPATH of ${TARGET_PATH} contains reference to build directory: ${rpath}")
+  endif()
+endforeach()
+]]
+            @ONLY
+        )
+    else()
+        set(script_file "${CMAKE_BINARY_DIR}/check_rpath_linux.cmake")
+        file(
+            CONFIGURE
+            OUTPUT "${script_file}"
+            CONTENT
+                [[
+# Check if the target path exists
+if(NOT EXISTS "${TARGET_PATH}")
+  message(STATUS "Binary ${TARGET_PATH} does not exist. Skipping RPATH check.")
+  return()
+endif()
+
+# We will collect all found RPATHs in this list
+set(rpaths "")
+
+# Linux and other ELF systems
+find_program(READELF_PATH readelf)
+if(READELF_PATH)
+  execute_process(
+    COMMAND ${READELF_PATH} -d ${TARGET_PATH}
+    OUTPUT_VARIABLE readelf_out
+    ERROR_VARIABLE readelf_err
+    RESULT_VARIABLE readelf_res
+  )
+  if(readelf_res EQUAL 0)
+    string(REPLACE "\n" ";" lines "${readelf_out}")
+    foreach(line ${lines})
+      if(line MATCHES ".*(RPATH|RUNPATH).*\\[(.*)\\]")
+        string(REGEX REPLACE ".*(RPATH|RUNPATH).*\\[(.*)\\].*" "\\2" rpath_list "${line}")
+        string(REPLACE ":" ";" rpath_dirs "${rpath_list}")
+        list(APPEND rpaths ${rpath_dirs})
+      endif()
+    endforeach()
+  else()
+    message(STATUS "Failed to run readelf: ${readelf_err}")
+  endif()
+else()
+  find_program(OBJDUMP_PATH objdump)
+  if(OBJDUMP_PATH)
+    execute_process(
+      COMMAND ${OBJDUMP_PATH} -x ${TARGET_PATH}
+      OUTPUT_VARIABLE objdump_out
+      ERROR_VARIABLE objdump_err
+      RESULT_VARIABLE objdump_res
+    )
+    if(objdump_res EQUAL 0)
+      string(REPLACE "\n" ";" lines "${objdump_out}")
+      foreach(line ${lines})
+        if(line MATCHES ".*(RPATH|RUNPATH)[ \t]+(.*)")
+          string(REGEX REPLACE ".*(RPATH|RUNPATH)[ \t]+(.*)" "\\2" rpath_list "${line}")
+          string(STRIP "${rpath_list}" rpath_list)
+          string(REPLACE ":" ";" rpath_dirs "${rpath_list}")
+          list(APPEND rpaths ${rpath_dirs})
+        endif()
+      endforeach()
+    else()
+      message(STATUS "Failed to run objdump: ${objdump_err}")
+    endif()
+  else()
+    message(STATUS "Neither readelf nor objdump was found. Skipping RPATH check.")
+  endif()
+endif()
+
+# Check if any RPATH contains references to the build directory
+foreach(rpath ${rpaths})
+  cmake_path(IS_PREFIX BUILD_DIR "${rpath}" NORMALIZE is_subpath)
+  if(is_subpath)
+    message(SEND_ERROR "RPATH of ${TARGET_PATH} contains reference to build directory: ${rpath}")
+  endif()
+endforeach()
+]]
+            @ONLY
+        )
+    endif()
+
+    install(
+        CODE
+            "
+        set(TARGET_PATH \"\${CMAKE_INSTALL_PREFIX}/${install_dir}/$<TARGET_FILE_NAME:${target}>\")
+        set(BUILD_DIR \"${CMAKE_BINARY_DIR}\")
+        include(\"${script_file}\")
+    "
+    )
 endfunction()
 
 if(JRL_GENERATE_API_DOC)
