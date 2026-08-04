@@ -4161,6 +4161,662 @@ function(jrl_python_compute_install_dir output)
 endfunction()
 
 #[============================================================================[
+# `_jrl_join_path`
+
+```cmake
+_jrl_join_path(
+    PATH_VAR <var>
+    [COMPONENTS <component>...]
+)
+```
+
+**Type:** function
+
+
+### Description
+  Join the components with `cmake_path(APPEND)` and normalize the result, then
+  remove the trailing separator that normalization keeps and `cmake_path` has no
+  operation for. A trailing separator matters: `cmake_path(RELATIVE_PATH)` keeps
+  it in its result, which would make two otherwise equal relative paths compare
+  different.
+
+  Empty components are skipped, so callers do not have to special-case optional
+  path parts. As with `cmake_path(APPEND)` and `std::filesystem`, an absolute
+  component replaces what came before it rather than being appended to it.
+
+
+### Arguments
+* `PATH_VAR`: Variable set to the joined path.
+* `COMPONENTS`: Path components to join.
+
+
+### Example
+```cmake
+_jrl_join_path(
+    PATH_VAR dir
+    COMPONENTS "/opt/prefix" "lib/python3.12/site-packages" ""
+)
+# dir is now "/opt/prefix/lib/python3.12/site-packages"
+```
+#]============================================================================]
+function(_jrl_join_path)
+    set(options)
+    set(oneValueArgs PATH_VAR)
+    set(multiValueArgs COMPONENTS)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    _jrl_check_no_unrecognized_arguments(arg)
+    _jrl_check_var_defined(arg_PATH_VAR)
+
+    set(joined "")
+    cmake_path(APPEND joined ${arg_COMPONENTS} OUTPUT_VARIABLE joined)
+    cmake_path(NORMAL_PATH joined)
+    string(REGEX REPLACE "/+$" "" joined "${joined}")
+
+    set(${arg_PATH_VAR} "${joined}" PARENT_SCOPE)
+endfunction()
+
+#[============================================================================[
+# `_jrl_path_relative_to_prefix`
+
+```cmake
+_jrl_path_relative_to_prefix(
+    RELATIVE_PATH_VAR <var>
+    [PATH <path>]
+    [PREFIX <prefix>]
+)
+```
+
+**Type:** function
+
+
+### Description
+  Express `PATH` relative to `PREFIX`. A relative path is already relative to
+  the prefix and is only normalized, an absolute path inside the prefix is made
+  relative to it, and an absolute path outside the prefix has no relative form.
+
+
+### Arguments
+* `RELATIVE_PATH_VAR`: Variable set to the path relative to the prefix, or to
+  `NOTFOUND` when there is none. Check it with `STREQUAL "NOTFOUND"`: an empty
+  value is a valid answer, it means "the prefix itself".
+* `PATH`: The path to express relative to the prefix. Empty or omitted means the
+  prefix itself.
+* `PREFIX`: The prefix, usually `CMAKE_INSTALL_PREFIX`. Without one, an absolute
+  path has no relative form.
+
+
+### Example
+```cmake
+_jrl_path_relative_to_prefix(PATH "/opt/prefix/lib" PREFIX "/opt/prefix" RELATIVE_PATH_VAR rel)
+# rel is "lib"
+_jrl_path_relative_to_prefix(PATH "lib" PREFIX "/opt/prefix" RELATIVE_PATH_VAR rel)
+# rel is "lib"
+_jrl_path_relative_to_prefix(PATH "/usr/lib" PREFIX "/opt/prefix" RELATIVE_PATH_VAR rel)
+# rel is "NOTFOUND"
+```
+#]============================================================================]
+function(_jrl_path_relative_to_prefix)
+    set(options)
+    set(oneValueArgs PATH PREFIX RELATIVE_PATH_VAR)
+    set(multiValueArgs)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    _jrl_check_no_unrecognized_arguments(arg)
+    _jrl_check_var_defined(arg_RELATIVE_PATH_VAR)
+
+    if("${arg_PATH}" STREQUAL "")
+        set(${arg_RELATIVE_PATH_VAR} "" PARENT_SCOPE)
+        return()
+    endif()
+
+    if(NOT IS_ABSOLUTE "${arg_PATH}")
+        _jrl_join_path(PATH_VAR relative_path COMPONENTS "${arg_PATH}")
+        set(${arg_RELATIVE_PATH_VAR} "${relative_path}" PARENT_SCOPE)
+        return()
+    endif()
+
+    if("${arg_PREFIX}" STREQUAL "")
+        set(${arg_RELATIVE_PATH_VAR} "NOTFOUND" PARENT_SCOPE)
+        return()
+    endif()
+
+    cmake_path(IS_PREFIX arg_PREFIX "${arg_PATH}" NORMALIZE is_inside_prefix)
+    if(NOT is_inside_prefix)
+        set(${arg_RELATIVE_PATH_VAR} "NOTFOUND" PARENT_SCOPE)
+        return()
+    endif()
+
+    cmake_path(SET absolute_path NORMALIZE "${arg_PATH}")
+    cmake_path(
+        RELATIVE_PATH absolute_path
+        BASE_DIRECTORY "${arg_PREFIX}"
+        OUTPUT_VARIABLE relative_path
+    )
+    if("${relative_path}" STREQUAL ".")
+        set(relative_path "")
+    endif()
+
+    set(${arg_RELATIVE_PATH_VAR} "${relative_path}" PARENT_SCOPE)
+endfunction()
+
+#[============================================================================[
+# `_jrl_get_library_output_dirs`
+
+```cmake
+_jrl_get_library_output_dirs(DIRS_VAR <var>)
+```
+
+**Type:** function
+
+
+### Description
+  Collect the directories where the buildsystem places shared libraries, one
+  entry per configuration, with duplicates removed.
+
+  Single-config generators use `CMAKE_LIBRARY_OUTPUT_DIRECTORY` as is.
+  Multi-config generators (Ninja Multi-Config, Xcode, Visual Studio) use
+  `CMAKE_LIBRARY_OUTPUT_DIRECTORY_<CONFIG>` when it is set, and otherwise append
+  the configuration name to `CMAKE_LIBRARY_OUTPUT_DIRECTORY`.
+
+  A single entry therefore means every configuration agrees on one directory,
+  several entries mean libraries land in a per-configuration subdirectory, and
+  an empty list means no library output directory is configured at all.
+
+
+### Arguments
+* `DIRS_VAR`: Variable set to the list of library output directories.
+
+
+### Example
+```cmake
+_jrl_get_library_output_dirs(DIRS_VAR library_build_dirs)
+```
+#]============================================================================]
+function(_jrl_get_library_output_dirs)
+    set(options)
+    set(oneValueArgs DIRS_VAR)
+    set(multiValueArgs)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    _jrl_check_no_unrecognized_arguments(arg)
+    _jrl_check_var_defined(arg_DIRS_VAR)
+
+    set(dirs "")
+
+    if(CMAKE_CONFIGURATION_TYPES)
+        foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
+            string(TOUPPER "${config}" config_upper)
+            if(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${config_upper})
+                list(APPEND dirs "${CMAKE_LIBRARY_OUTPUT_DIRECTORY_${config_upper}}")
+            elseif(CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+                list(APPEND dirs "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/${config}")
+            endif()
+        endforeach()
+    elseif(CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+        list(APPEND dirs "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+    endif()
+
+    list(REMOVE_DUPLICATES dirs)
+
+    set(${arg_DIRS_VAR} "${dirs}" PARENT_SCOPE)
+endfunction()
+
+#[============================================================================[
+# `_jrl_python_compute_module_layout`
+
+```cmake
+_jrl_python_compute_module_layout(
+    BINARY_DIR <dir>
+    INSTALL_PREFIX <dir>
+    SITE_PACKAGES_INSTALL_DIR <dir>
+    LIBRARY_INSTALL_DIR <dir>
+    LIBRARY_BUILD_DIRS <dir>...
+    ORIGIN_TOKEN <token>
+    [PACKAGE_DIR <subdir>]
+    [MIRRORED_VAR <var>]
+    [RPATH_VAR <var>]
+    [SITE_PACKAGES_BUILD_DIR_VAR <var>]
+    [REASON_VAR <var>]
+)
+```
+
+**Type:** function
+
+
+### Description
+  Decide whether the build tree can mirror the install layout of a python
+  extension module, and compute the resulting build directory and RPATH.
+  See `jrl_target_set_python_module_layout()` for what this is good for.
+
+  This function only does path arithmetic: it reads no global variable and
+  touches no target, so every decision it makes can be unit tested.
+
+
+### Arguments
+* `BINARY_DIR`: The build tree root, usually `CMAKE_BINARY_DIR`.
+* `INSTALL_PREFIX`: The install prefix, usually `CMAKE_INSTALL_PREFIX`. Used to
+  express absolute install paths relative to the prefix.
+* `SITE_PACKAGES_INSTALL_DIR`: The site-packages install dir, relative to the
+  prefix or absolute.
+* `LIBRARY_INSTALL_DIR`: The library install dir, usually `CMAKE_INSTALL_LIBDIR`.
+* `LIBRARY_BUILD_DIRS`: The library output dirs of the build tree, as returned by
+  `_jrl_get_library_output_dirs()`.
+* `ORIGIN_TOKEN`: The loader-relative token to build the RPATH with,
+  `@loader_path` on macOS and `$ORIGIN` on other UNIX systems. Pass an empty
+  value on platforms without RPATH support: the layout is then never mirrored.
+* `PACKAGE_DIR`: Path of the module below site-packages, e.g. `mypkg` or
+  `mypkg/sub`. Omit for a module sitting directly in site-packages.
+* `MIRRORED_VAR`: Variable set to `TRUE` when the build tree mirrors the install
+  layout, `FALSE` otherwise.
+* `RPATH_VAR`: Variable set to the loader-relative RPATH, valid in both trees.
+  Empty when the layout is not mirrored.
+* `SITE_PACKAGES_BUILD_DIR_VAR`: Variable set to the build-tree site-packages
+  root, always an absolute path.
+* `REASON_VAR`: Variable set to a human-readable sentence explaining the
+  decision. Reported by the caller to make a silent fallback diagnosable.
+
+
+### Example
+```cmake
+_jrl_python_compute_module_layout(
+    BINARY_DIR /build
+    INSTALL_PREFIX /opt/prefix
+    SITE_PACKAGES_INSTALL_DIR lib/python3.12/site-packages
+    LIBRARY_INSTALL_DIR lib
+    LIBRARY_BUILD_DIRS /build/lib
+    ORIGIN_TOKEN "$ORIGIN"
+    PACKAGE_DIR mypkg
+    MIRRORED_VAR mirrored              # TRUE
+    RPATH_VAR rpath                    # "$ORIGIN/../../.."
+    SITE_PACKAGES_BUILD_DIR_VAR bdir   # "/build/lib/python3.12/site-packages"
+)
+```
+#]============================================================================]
+function(_jrl_python_compute_module_layout)
+    set(options)
+    set(oneValueArgs
+        BINARY_DIR
+        INSTALL_PREFIX
+        SITE_PACKAGES_INSTALL_DIR
+        LIBRARY_INSTALL_DIR
+        ORIGIN_TOKEN
+        PACKAGE_DIR
+        MIRRORED_VAR
+        RPATH_VAR
+        SITE_PACKAGES_BUILD_DIR_VAR
+        REASON_VAR
+    )
+    set(multiValueArgs LIBRARY_BUILD_DIRS)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    _jrl_check_no_unrecognized_arguments(arg)
+    _jrl_check_var_defined(arg_BINARY_DIR)
+    _jrl_check_var_defined(arg_INSTALL_PREFIX)
+    _jrl_check_var_defined(arg_SITE_PACKAGES_INSTALL_DIR)
+
+    # A bad PACKAGE_DIR is a caller mistake, not an environment to adapt to.
+    if(arg_PACKAGE_DIR)
+        if(IS_ABSOLUTE "${arg_PACKAGE_DIR}")
+            message(
+                FATAL_ERROR
+                "PACKAGE_DIR must be relative to site-packages, got '${arg_PACKAGE_DIR}'."
+            )
+        endif()
+        if("${arg_PACKAGE_DIR}" MATCHES "(^|/)\\.\\.(/|$)")
+            message(
+                FATAL_ERROR
+                "PACKAGE_DIR must not contain '..' components, got '${arg_PACKAGE_DIR}'."
+            )
+        endif()
+    endif()
+
+    # The first check to set 'reason' wins. An empty 'reason' at the end of the
+    # chain means the layout can be mirrored.
+    set(reason "")
+
+    if("${arg_ORIGIN_TOKEN}" STREQUAL "")
+        set(reason "this platform has no loader-relative RPATH")
+    endif()
+
+    if(NOT reason)
+        list(LENGTH arg_LIBRARY_BUILD_DIRS library_build_dirs_count)
+        if(library_build_dirs_count EQUAL 0)
+            set(reason "no library output directory is set (CMAKE_LIBRARY_OUTPUT_DIRECTORY)")
+        elseif(library_build_dirs_count GREATER 1)
+            string(REPLACE ";" ", " dirs "${arg_LIBRARY_BUILD_DIRS}")
+            set(reason "libraries go to a different directory in each configuration (${dirs})")
+        endif()
+    endif()
+
+    if(NOT reason)
+        list(GET arg_LIBRARY_BUILD_DIRS 0 library_build_dir)
+        string(GENEX_STRIP "${library_build_dir}" library_build_dir_stripped)
+        if(NOT "${library_build_dir_stripped}" STREQUAL "${library_build_dir}")
+            set(reason
+                "the library output directory holds a generator expression (${library_build_dir})"
+            )
+        elseif(NOT IS_ABSOLUTE "${library_build_dir}")
+            set(reason "the library output directory is not absolute (${library_build_dir})")
+        endif()
+    endif()
+
+    if(NOT reason AND "${arg_LIBRARY_INSTALL_DIR}" STREQUAL "")
+        set(reason "no library install directory is set (CMAKE_INSTALL_LIBDIR)")
+    endif()
+
+    if(NOT reason)
+        _jrl_path_relative_to_prefix(
+            PATH "${arg_SITE_PACKAGES_INSTALL_DIR}"
+            PREFIX "${arg_INSTALL_PREFIX}"
+            RELATIVE_PATH_VAR site_packages_rel
+        )
+        if("${site_packages_rel}" STREQUAL "NOTFOUND")
+            set(reason
+                "the site-packages install dir '${arg_SITE_PACKAGES_INSTALL_DIR}' is outside the install prefix '${arg_INSTALL_PREFIX}'"
+            )
+        endif()
+    endif()
+
+    if(NOT reason)
+        _jrl_path_relative_to_prefix(
+            PATH "${arg_LIBRARY_INSTALL_DIR}"
+            PREFIX "${arg_INSTALL_PREFIX}"
+            RELATIVE_PATH_VAR library_install_rel
+        )
+        if("${library_install_rel}" STREQUAL "NOTFOUND")
+            set(reason
+                "the library install dir '${arg_LIBRARY_INSTALL_DIR}' is outside the install prefix '${arg_INSTALL_PREFIX}'"
+            )
+        endif()
+    endif()
+
+    if(NOT reason)
+        # Lay out the candidate build tree and compare, instead of assuming
+        # the two trees agree.
+        _jrl_join_path(
+            PATH_VAR module_install_dir
+            COMPONENTS "${arg_INSTALL_PREFIX}" "${site_packages_rel}" "${arg_PACKAGE_DIR}"
+        )
+        _jrl_join_path(
+            PATH_VAR module_build_dir
+            COMPONENTS "${arg_BINARY_DIR}" "${site_packages_rel}" "${arg_PACKAGE_DIR}"
+        )
+        _jrl_join_path(
+            PATH_VAR library_install_dir
+            COMPONENTS "${arg_INSTALL_PREFIX}" "${library_install_rel}"
+        )
+        _jrl_join_path(PATH_VAR library_build_dir COMPONENTS "${library_build_dir}")
+
+        cmake_path(
+            RELATIVE_PATH library_install_dir
+            BASE_DIRECTORY "${module_install_dir}"
+            OUTPUT_VARIABLE install_rel_libdir
+        )
+        cmake_path(
+            RELATIVE_PATH library_build_dir
+            BASE_DIRECTORY "${module_build_dir}"
+            OUTPUT_VARIABLE build_rel_libdir
+        )
+
+        if(NOT "${install_rel_libdir}" STREQUAL "${build_rel_libdir}")
+            set(reason
+                "the module would reach the library dir through '${build_rel_libdir}' in the build tree but '${install_rel_libdir}' in the install tree"
+            )
+        endif()
+    endif()
+
+    if(reason)
+        # Keep the plain build layout jrl projects already use for python
+        # modules.
+        set(mirrored FALSE)
+        set(rpath "")
+        _jrl_join_path(
+            PATH_VAR site_packages_build_dir
+            COMPONENTS "${arg_BINARY_DIR}" "lib/site-packages"
+        )
+    else()
+        set(mirrored TRUE)
+        set(reason "the build tree mirrors the install layout")
+        _jrl_join_path(
+            PATH_VAR site_packages_build_dir
+            COMPONENTS "${arg_BINARY_DIR}" "${site_packages_rel}"
+        )
+        set(rpath "${arg_ORIGIN_TOKEN}")
+        if(NOT "${install_rel_libdir}" STREQUAL ".")
+            string(APPEND rpath "/${install_rel_libdir}")
+        endif()
+    endif()
+
+    if(arg_MIRRORED_VAR)
+        set(${arg_MIRRORED_VAR} ${mirrored} PARENT_SCOPE)
+    endif()
+    if(arg_RPATH_VAR)
+        set(${arg_RPATH_VAR} "${rpath}" PARENT_SCOPE)
+    endif()
+    if(arg_SITE_PACKAGES_BUILD_DIR_VAR)
+        set(${arg_SITE_PACKAGES_BUILD_DIR_VAR} "${site_packages_build_dir}" PARENT_SCOPE)
+    endif()
+    if(arg_REASON_VAR)
+        set(${arg_REASON_VAR} "${reason}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+#[============================================================================[
+# `jrl_target_set_python_module_layout`
+
+```cmake
+jrl_target_set_python_module_layout(
+    <target_name>
+    [PACKAGE_DIR <subdir>]
+    [SITE_PACKAGES_INSTALL_DIR <dir>]
+    [SITE_PACKAGES_INSTALL_DIR_VAR <var>]
+    [SITE_PACKAGES_BUILD_DIR_VAR <var>]
+)
+```
+
+**Type:** function
+
+
+### Description
+  Place a python extension module in the build tree at the same depth it will
+  have once installed, and give it an RPATH relative to its own location, so
+  that the very same RPATH is correct in both trees.
+
+#### The problem it solves
+
+  A python extension module (`mymodule.so`) must find the C++ shared libraries
+  it was linked against (`libmylib.so`). It finds them through its RPATH: a
+  list of search paths stored inside the module file itself.
+
+  By default CMake writes an **absolute** RPATH pointing into the build tree,
+  then **rewrites** it at install time to point into the install tree. That
+  rewrite costs us two things:
+
+  1. The installed module holds an absolute path from the machine that built
+     it, so the installation cannot be moved. Conda packages, python wheels and
+     relocatable prefixes all need it to be movable.
+  2. On macOS the rewrite is done by `install_name_tool`, which modifies the
+     module after the linker has signed it. The signature then has to be
+     recreated, and when it cannot be (a real signing identity, an older
+     toolchain) the module is left with a broken signature and refuses to load.
+
+#### How it is solved
+
+  Put the module in the build tree at the same depth, relative to the library
+  directory, as it will have in the install tree:
+
+  ```
+  build tree                                install tree
+  ----------------------------------        -------------------------------------
+  build/lib/libmylib.so                     <prefix>/lib/libmylib.so
+  build/lib/python3.12/site-packages/       <prefix>/lib/python3.12/site-packages/
+      mypkg/mymodule.so                         mypkg/mymodule.so
+  ```
+
+  From the module, `../../..` is the library directory in **both** trees. So the
+  module can use one loader-relative RPATH everywhere (`@loader_path/../../..`
+  on macOS, `$ORIGIN/../../..` elsewhere), and CMake has nothing left to rewrite
+  at install time. Therefore:
+
+  * the installed module is relocatable: it finds its libraries relative to
+    itself, instead of through a path baked in at build time;
+  * nothing rewrites the module while installing it, so the installed file is,
+    byte for byte, the file that was built and signed. On macOS
+    `install_name_tool` never runs on it and no re-signing pass is needed.
+
+#### When the layout cannot be mirrored
+
+  Mirroring is only sound when the module reaches the library directory through
+  the same relative path in both trees, which this function checks rather than
+  assumes. When it does not hold, the module goes to
+  `${CMAKE_BINARY_DIR}/lib/site-packages` and keeps CMake's default RPATH
+  handling. That happens when:
+
+  * the platform has no RPATH (Windows);
+  * `CMAKE_INSTALL_LIBDIR` does not match `CMAKE_LIBRARY_OUTPUT_DIRECTORY`, for
+    instance on Debian multiarch (`lib/x86_64-linux-gnu` versus `lib`);
+  * the site-packages or library install dir is an absolute path outside
+    `CMAKE_INSTALL_PREFIX`;
+  * libraries go to a per-configuration subdirectory (a multi-config generator
+    such as Xcode without per-configuration output dirs);
+  * no library output directory is set at all.
+
+  That fallback stays correct, it only reinstates the install-time rewrite.
+  The reason is reported at `DEBUG` log level, so configure with
+  `--log-level=DEBUG` to find out why a project did not get the mirrored layout.
+
+#### Notes
+
+  * This function calls `jrl_target_set_output_directory()`, so it must be
+    called **instead of** it, not alongside it.
+  * RPATH entries the project already set (through `CMAKE_INSTALL_RPATH` or the
+    target's `INSTALL_RPATH`) are kept, the relative entry is prepended.
+  * The mirrored layout sets `BUILD_WITH_INSTALL_RPATH`, so the module does not
+    get CMake's automatic build-tree RPATH. If it links against libraries that
+    live neither in the build tree nor under the install prefix, add their
+    directory to `CMAKE_INSTALL_RPATH`, or set
+    `CMAKE_INSTALL_RPATH_USE_LINK_PATH`.
+
+
+### Arguments
+* `target_name`: The python module target.
+* `PACKAGE_DIR`: Path of the module below site-packages, e.g. `mypkg` or
+  `mypkg/sub`. Omit for a module installed directly into site-packages.
+* `SITE_PACKAGES_INSTALL_DIR`: The site-packages install dir. Defaults to
+  `jrl_python_compute_install_dir()`, which is what most projects want. Pass it
+  explicitly to override the destination, or to reuse a value computed earlier
+  and not repeat its configure-time report.
+* `SITE_PACKAGES_INSTALL_DIR_VAR`: Variable set to the site-packages install dir
+  actually used, to be used as the `install()` destination. Relative to
+  `CMAKE_INSTALL_PREFIX` in the default case, but absolute whenever
+  `jrl_python_compute_install_dir()` takes one of its override paths, so do not
+  assume either.
+* `SITE_PACKAGES_BUILD_DIR_VAR`: Variable set to the build-tree site-packages
+  root, always an absolute path. Use it as `PYTHONPATH` and as the source of the
+  companion `install(DIRECTORY)`. Do not hardcode
+  `${CMAKE_BINARY_DIR}/lib/site-packages` next to this function: the build-tree
+  root moves with the layout.
+
+  Both directories are site-packages **roots**: the module itself goes into
+  `<root>/<PACKAGE_DIR>` in both trees.
+
+
+### Example
+```cmake
+jrl_target_set_python_module_layout(
+    my_pywrap
+    PACKAGE_DIR mypkg
+    SITE_PACKAGES_INSTALL_DIR_VAR python_install_dir
+    SITE_PACKAGES_BUILD_DIR_VAR python_build_dir
+)
+
+install(TARGETS my_pywrap DESTINATION ${python_install_dir}/mypkg)
+install(
+    DIRECTORY ${python_build_dir}/mypkg
+    DESTINATION ${python_install_dir}
+    FILES_MATCHING
+    PATTERN "*.py"
+    PATTERN "*.pyi"
+)
+```
+#]============================================================================]
+function(jrl_target_set_python_module_layout target_name)
+    set(options)
+    set(oneValueArgs
+        PACKAGE_DIR
+        SITE_PACKAGES_INSTALL_DIR
+        SITE_PACKAGES_INSTALL_DIR_VAR
+        SITE_PACKAGES_BUILD_DIR_VAR
+    )
+    set(multiValueArgs)
+    cmake_parse_arguments(arg "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    _jrl_check_no_unrecognized_arguments(arg)
+    _jrl_check_target_exists(${target_name})
+
+    if(arg_SITE_PACKAGES_INSTALL_DIR)
+        set(site_packages_install_dir "${arg_SITE_PACKAGES_INSTALL_DIR}")
+    else()
+        jrl_python_compute_install_dir(site_packages_install_dir)
+    endif()
+
+    # No loader-relative token means no RPATH at all on this platform (Windows).
+    set(origin_token "")
+    if(APPLE)
+        set(origin_token "@loader_path")
+    elseif(UNIX)
+        set(origin_token "$ORIGIN")
+    endif()
+
+    _jrl_get_library_output_dirs(DIRS_VAR library_build_dirs)
+
+    _jrl_python_compute_module_layout(
+        BINARY_DIR "${CMAKE_BINARY_DIR}"
+        INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}"
+        SITE_PACKAGES_INSTALL_DIR "${site_packages_install_dir}"
+        LIBRARY_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}"
+        LIBRARY_BUILD_DIRS "${library_build_dirs}"
+        ORIGIN_TOKEN "${origin_token}"
+        PACKAGE_DIR "${arg_PACKAGE_DIR}"
+        MIRRORED_VAR mirrored
+        RPATH_VAR rpath
+        SITE_PACKAGES_BUILD_DIR_VAR site_packages_build_dir
+        REASON_VAR reason
+    )
+
+    if(mirrored)
+        message(DEBUG "Python module '${target_name}': ${reason}, using RPATH '${rpath}'.")
+
+        # Prepend, so that RPATH entries the project already asked for survive.
+        set(install_rpath "${rpath}")
+        get_target_property(existing_rpath ${target_name} INSTALL_RPATH)
+        if(existing_rpath)
+            list(APPEND install_rpath "${existing_rpath}")
+            list(REMOVE_DUPLICATES install_rpath)
+        endif()
+
+        set_target_properties(
+            ${target_name}
+            PROPERTIES INSTALL_RPATH "${install_rpath}" BUILD_WITH_INSTALL_RPATH ON
+        )
+    else()
+        message(
+            DEBUG
+            "Python module '${target_name}': not mirroring the install layout because ${reason}. Keeping CMake's default RPATH handling."
+        )
+    endif()
+
+    _jrl_join_path(
+        PATH_VAR module_build_dir
+        COMPONENTS "${site_packages_build_dir}" "${arg_PACKAGE_DIR}"
+    )
+    jrl_target_set_output_directory(${target_name} OUTPUT_DIRECTORY "${module_build_dir}")
+
+    if(arg_SITE_PACKAGES_INSTALL_DIR_VAR)
+        set(${arg_SITE_PACKAGES_INSTALL_DIR_VAR} "${site_packages_install_dir}" PARENT_SCOPE)
+    endif()
+    if(arg_SITE_PACKAGES_BUILD_DIR_VAR)
+        set(${arg_SITE_PACKAGES_BUILD_DIR_VAR} "${site_packages_build_dir}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+#[============================================================================[
 # `jrl_check_python_module_name`
 
 ```cpp

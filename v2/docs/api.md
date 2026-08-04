@@ -1292,6 +1292,143 @@ and the Conda native libraries are located in the `lib/` folder, just like a sta
   jrl_python_compute_install_dir(python_install_dir)
   install(TARGETS my_python_module DESTINATION ${python_install_dir} ...)
 ```
+# `jrl_target_set_python_module_layout`
+
+```cmake
+jrl_target_set_python_module_layout(
+    <target_name>
+    [PACKAGE_DIR <subdir>]
+    [SITE_PACKAGES_INSTALL_DIR <dir>]
+    [SITE_PACKAGES_INSTALL_DIR_VAR <var>]
+    [SITE_PACKAGES_BUILD_DIR_VAR <var>]
+)
+```
+
+**Type:** function
+
+
+### Description
+  Place a python extension module in the build tree at the same depth it will
+  have once installed, and give it an RPATH relative to its own location, so
+  that the very same RPATH is correct in both trees.
+
+#### The problem it solves
+
+  A python extension module (`mymodule.so`) must find the C++ shared libraries
+  it was linked against (`libmylib.so`). It finds them through its RPATH: a
+  list of search paths stored inside the module file itself.
+
+  By default CMake writes an **absolute** RPATH pointing into the build tree,
+  then **rewrites** it at install time to point into the install tree. That
+  rewrite costs us two things:
+
+  1. The installed module holds an absolute path from the machine that built
+     it, so the installation cannot be moved. Conda packages, python wheels and
+     relocatable prefixes all need it to be movable.
+  2. On macOS the rewrite is done by `install_name_tool`, which modifies the
+     module after the linker has signed it. The signature then has to be
+     recreated, and when it cannot be (a real signing identity, an older
+     toolchain) the module is left with a broken signature and refuses to load.
+
+#### How it is solved
+
+  Put the module in the build tree at the same depth, relative to the library
+  directory, as it will have in the install tree:
+
+  ```
+  build tree                                install tree
+  ----------------------------------        -------------------------------------
+  build/lib/libmylib.so                     <prefix>/lib/libmylib.so
+  build/lib/python3.12/site-packages/       <prefix>/lib/python3.12/site-packages/
+      mypkg/mymodule.so                         mypkg/mymodule.so
+  ```
+
+  From the module, `../../..` is the library directory in **both** trees. So the
+  module can use one loader-relative RPATH everywhere (`@loader_path/../../..`
+  on macOS, `$ORIGIN/../../..` elsewhere), and CMake has nothing left to rewrite
+  at install time. Therefore:
+
+  * the installed module is relocatable: it finds its libraries relative to
+    itself, instead of through a path baked in at build time;
+  * nothing rewrites the module while installing it, so the installed file is,
+    byte for byte, the file that was built and signed. On macOS
+    `install_name_tool` never runs on it and no re-signing pass is needed.
+
+#### When the layout cannot be mirrored
+
+  Mirroring is only sound when the module reaches the library directory through
+  the same relative path in both trees, which this function checks rather than
+  assumes. When it does not hold, the module goes to
+  `${CMAKE_BINARY_DIR}/lib/site-packages` and keeps CMake's default RPATH
+  handling. That happens when:
+
+  * the platform has no RPATH (Windows);
+  * `CMAKE_INSTALL_LIBDIR` does not match `CMAKE_LIBRARY_OUTPUT_DIRECTORY`, for
+    instance on Debian multiarch (`lib/x86_64-linux-gnu` versus `lib`);
+  * the site-packages or library install dir is an absolute path outside
+    `CMAKE_INSTALL_PREFIX`;
+  * libraries go to a per-configuration subdirectory (a multi-config generator
+    such as Xcode without per-configuration output dirs);
+  * no library output directory is set at all.
+
+  That fallback stays correct, it only reinstates the install-time rewrite.
+  The reason is reported at `DEBUG` log level, so configure with
+  `--log-level=DEBUG` to find out why a project did not get the mirrored layout.
+
+#### Notes
+
+  * This function calls `jrl_target_set_output_directory()`, so it must be
+    called **instead of** it, not alongside it.
+  * RPATH entries the project already set (through `CMAKE_INSTALL_RPATH` or the
+    target's `INSTALL_RPATH`) are kept, the relative entry is prepended.
+  * The mirrored layout sets `BUILD_WITH_INSTALL_RPATH`, so the module does not
+    get CMake's automatic build-tree RPATH. If it links against libraries that
+    live neither in the build tree nor under the install prefix, add their
+    directory to `CMAKE_INSTALL_RPATH`, or set
+    `CMAKE_INSTALL_RPATH_USE_LINK_PATH`.
+
+
+### Arguments
+* `target_name`: The python module target.
+* `PACKAGE_DIR`: Path of the module below site-packages, e.g. `mypkg` or
+  `mypkg/sub`. Omit for a module installed directly into site-packages.
+* `SITE_PACKAGES_INSTALL_DIR`: The site-packages install dir. Defaults to
+  `jrl_python_compute_install_dir()`, which is what most projects want. Pass it
+  explicitly to override the destination, or to reuse a value computed earlier
+  and not repeat its configure-time report.
+* `SITE_PACKAGES_INSTALL_DIR_VAR`: Variable set to the site-packages install dir
+  actually used, to be used as the `install()` destination. Relative to
+  `CMAKE_INSTALL_PREFIX` in the default case, but absolute whenever
+  `jrl_python_compute_install_dir()` takes one of its override paths, so do not
+  assume either.
+* `SITE_PACKAGES_BUILD_DIR_VAR`: Variable set to the build-tree site-packages
+  root, always an absolute path. Use it as `PYTHONPATH` and as the source of the
+  companion `install(DIRECTORY)`. Do not hardcode
+  `${CMAKE_BINARY_DIR}/lib/site-packages` next to this function: the build-tree
+  root moves with the layout.
+
+  Both directories are site-packages **roots**: the module itself goes into
+  `<root>/<PACKAGE_DIR>` in both trees.
+
+
+### Example
+```cmake
+jrl_target_set_python_module_layout(
+    my_pywrap
+    PACKAGE_DIR mypkg
+    SITE_PACKAGES_INSTALL_DIR_VAR python_install_dir
+    SITE_PACKAGES_BUILD_DIR_VAR python_build_dir
+)
+
+install(TARGETS my_pywrap DESTINATION ${python_install_dir}/mypkg)
+install(
+    DIRECTORY ${python_build_dir}/mypkg
+    DESTINATION ${python_install_dir}
+    FILES_MATCHING
+    PATTERN "*.py"
+    PATTERN "*.pyi"
+)
+```
 # `jrl_check_python_module_name`
 
 ```cpp
