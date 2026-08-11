@@ -48,6 +48,13 @@ option(
   OFF
 )
 
+# CppAD is missing from the Arch Linux repositories.
+option(
+  JRL_CMAKEMODULES_ENABLE_TEST_CPPAD
+  "Run the Findcppad test (requires CppAD)"
+  OFF
+)
+
 option(JRL_CMAKEMODULES_INSTALL_V2_ONLY "Install only the v2 API" OFF)
 
 if(JRL_CMAKEMODULES_GENERATE_API_DOC)
