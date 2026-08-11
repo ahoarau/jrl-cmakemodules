@@ -36,32 +36,32 @@ set(
   ${CMAKE_INSTALL_DATAROOTDIR}/cmake/jrl-cmakemodules
 )
 
-option(
+jrl_option(
   JRL_CMAKEMODULES_GENERATE_API_DOC
   "Generate the API documentation for jrl-cmakemodules (v2)"
   OFF
 )
 
-option(
+jrl_option(
   JRL_CMAKEMODULES_BUILD_TESTS
   "Build the tests for jrl-cmakemodules (v2)"
   OFF
 )
 
 # CppAD is missing from the Arch repositories and CppADCodeGen is conda-forge only.
-option(
+jrl_option(
   JRL_CMAKEMODULES_ENABLE_TEST_CPPAD
   "Run the Findcppad test (requires CppAD)"
   OFF
 )
 
-option(
+jrl_option(
   JRL_CMAKEMODULES_ENABLE_TEST_CPPADCG
   "Run the Findcppadcg test (requires CppADCodeGen)"
   OFF
 )
 
-option(JRL_CMAKEMODULES_INSTALL_V2_ONLY "Install only the v2 API" OFF)
+jrl_option(JRL_CMAKEMODULES_INSTALL_V2_ONLY "Install only the v2 API" OFF)
 
 if(JRL_CMAKEMODULES_GENERATE_API_DOC)
   _jrl_generate_api_doc(
