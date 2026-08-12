@@ -1685,6 +1685,80 @@ function(_jrl_search_package_module_file package_name output_filepath)
 endfunction()
 
 #[============================================================================[
+# `jrl_export_find_module`
+
+```cpp
+jrl_export_find_module(<PackageName>|<path>...)
+```
+
+**Type:** function
+
+
+### Description
+  Install extra Find<Package>.cmake modules with the exported package.
+
+  jrl_find_package() already ships the find module it used, but it cannot know what that
+  module calls internally. A find module that itself calls find_package() therefore breaks
+  for consumers of the installed package, because its own dependency was not shipped.
+  FindMPFR.cmake calls find_package(GMP), so a project using it must also export FindGMP.cmake:
+
+  ```cmake
+  jrl_find_package(MPFR REQUIRED EXPECTED_TARGETS MPFR::MPFR)
+  jrl_export_find_module(GMP)
+  ```
+
+  Each argument is either a package name, resolved like jrl_find_package() resolves find
+  modules, or a path to a module file. Paths make it possible to export find modules that
+  live in the project itself, which do not have to be jrl modules.
+
+  The modules are installed side by side in a `find-modules` directory that is prepended to
+  CMAKE_MODULE_PATH before any find_dependency() call, so exported modules can find each
+  other. Calling this twice for the same module is harmless.
+
+
+### Arguments
+* `PackageName|path`: Package names or paths to Find<Package>.cmake files to install with the package.
+
+
+### Example
+```cmake
+jrl_export_find_module(GMP)
+jrl_export_find_module(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindMyDep.cmake)
+```
+#]============================================================================]
+function(jrl_export_find_module)
+    if(NOT ARGN)
+        message(
+            FATAL_ERROR
+            "jrl_export_find_module: at least one package name or path is required."
+        )
+    endif()
+
+    foreach(entry IN LISTS ARGN)
+        if(EXISTS "${entry}" AND NOT IS_DIRECTORY "${entry}")
+            set(module_file "${entry}")
+        else()
+            _jrl_search_package_module_file(${entry} module_file)
+            if(NOT module_file)
+                message(
+                    FATAL_ERROR
+                    "jrl_export_find_module: could not find Find${entry}.cmake. Pass a path to the "
+                    "module file, or add the directory containing it to CMAKE_MODULE_PATH."
+                )
+            endif()
+        endif()
+
+        cmake_path(CONVERT "${module_file}" TO_CMAKE_PATH_LIST module_file NORMALIZE)
+        message(DEBUG "    Exporting find module: ${module_file}")
+        set_property(
+            GLOBAL
+            APPEND
+            PROPERTY _jrl_${PROJECT_NAME}_exported_find_modules "${module_file}"
+        )
+    endforeach()
+endfunction()
+
+#[============================================================================[
 # `jrl_export_dependency`
 
 ```cpp
@@ -2370,6 +2444,13 @@ list(APPEND all_interface_link_libraries \"${condition_matches}\" \"${condition_
         message(DEBUG "No package dependencies recorded with jrl_find_package()")
     endif()
 
+    # Extra find modules registered with jrl_export_find_module(), installed side by side so
+    # that a find module calling another find module keeps working for consumers.
+    get_property(exported_find_modules GLOBAL PROPERTY _jrl_${PROJECT_NAME}_exported_find_modules)
+    if(exported_find_modules)
+        list(REMOVE_DUPLICATES exported_find_modules)
+    endif()
+
     # file(WRITE) and not file(GENERATE): nothing here needs to be evaluated, and
     # file(GENERATE) would expand any generator expression found in those values.
     file(
@@ -2381,6 +2462,9 @@ set(all_exported_targets [[${all_exported_targets}]])
 
 # The list of external dependencies recorded via jrl_find_package()
 set(package_dependencies_json_content [[${package_dependencies_json_content}]])
+
+# The find modules registered via jrl_export_find_module()
+set(exported_find_modules [[${exported_find_modules}]])
 "
     )
 

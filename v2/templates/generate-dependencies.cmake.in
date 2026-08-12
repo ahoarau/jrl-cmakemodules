@@ -66,6 +66,23 @@ endif()
 set(fd "")
 set(unknwon_libraries "")
 set(missing_expected_dep_indices "")
+
+# Find modules registered with jrl_export_find_module(). They are installed side by side in
+# a single directory, prepended to CMAKE_MODULE_PATH before any find_dependency() below, so
+# that a find module which itself calls find_package() can locate the module it needs.
+if(exported_find_modules)
+    set(fd "include(CMakeFindDependencyMacro)\n\n")
+    string(APPEND fd "list(PREPEND CMAKE_MODULE_PATH \${CMAKE_CURRENT_LIST_DIR}/find-modules)\n\n")
+
+    if(IS_ABSOLUTE @INSTALL_DESTINATION@)
+        set(exported_find_modules_dir @INSTALL_DESTINATION@/find-modules)
+    else()
+        set(exported_find_modules_dir ${CMAKE_INSTALL_PREFIX}/@INSTALL_DESTINATION@/find-modules)
+    endif()
+    # Use the undocumented file(INSTALL) command to install files in a script.
+    # This is the same syntax as the generated cmake_install.cmake file.
+    file(INSTALL DESTINATION ${exported_find_modules_dir} TYPE FILE FILES ${exported_find_modules})
+endif()
 foreach(ll IN LISTS all_interface_link_libraries)
     # A quoted multi-line expression keeps its line breaks: "$<INSTALL_INTERFACE:\n Foo\n>"
     # evaluates to "\n Foo\n". A link library has no surrounding whitespace, see CMP0004.

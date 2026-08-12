@@ -567,6 +567,46 @@ jrl_target_generate_config_header(mylib INTERFACE
 # Will generate myproject/config.hh. Use with #include "myproject/config.hh"
 # Inside you will find MYPROJECT_LIBRARY_VERSION macros (not MYLIB_LIBRARY_VERSION).
 ```
+# `jrl_export_find_module`
+
+```cpp
+jrl_export_find_module(<PackageName>|<path>...)
+```
+
+**Type:** function
+
+
+### Description
+  Install extra Find<Package>.cmake modules with the exported package.
+
+  jrl_find_package() already ships the find module it used, but it cannot know what that
+  module calls internally. A find module that itself calls find_package() therefore breaks
+  for consumers of the installed package, because its own dependency was not shipped.
+  FindMPFR.cmake calls find_package(GMP), so a project using it must also export FindGMP.cmake:
+
+  ```cmake
+  jrl_find_package(MPFR REQUIRED EXPECTED_TARGETS MPFR::MPFR)
+  jrl_export_find_module(GMP)
+  ```
+
+  Each argument is either a package name, resolved like jrl_find_package() resolves find
+  modules, or a path to a module file. Paths make it possible to export find modules that
+  live in the project itself, which do not have to be jrl modules.
+
+  The modules are installed side by side in a `find-modules` directory that is prepended to
+  CMAKE_MODULE_PATH before any find_dependency() call, so exported modules can find each
+  other. Calling this twice for the same module is harmless.
+
+
+### Arguments
+* `PackageName|path`: Package names or paths to Find<Package>.cmake files to install with the package.
+
+
+### Example
+```cmake
+jrl_export_find_module(GMP)
+jrl_export_find_module(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindMyDep.cmake)
+```
 # `jrl_export_dependency`
 
 ```cpp

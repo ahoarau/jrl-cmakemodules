@@ -25,6 +25,11 @@ endif()
 set(cppadcg_cmake_module_path_backup "${CMAKE_MODULE_PATH}")
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
 find_package(cppad QUIET)
+# Ship Findcppad.cmake with the exported package: without it find_package(cppadcg) cannot work
+# for a consumer. Guarded so this module stays usable outside jrl-cmakemodules.
+if(COMMAND jrl_export_find_module)
+    jrl_export_find_module(cppad)
+endif()
 set(CMAKE_MODULE_PATH "${cppadcg_cmake_module_path_backup}")
 unset(cppadcg_cmake_module_path_backup)
 

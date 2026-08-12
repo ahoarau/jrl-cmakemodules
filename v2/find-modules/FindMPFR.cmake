@@ -36,6 +36,11 @@ endif()
 set(MPFR_cmake_module_path_backup "${CMAKE_MODULE_PATH}")
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
 find_package(GMP QUIET)
+# Ship FindGMP.cmake with the exported package: without it find_package(MPFR) cannot work for
+# a consumer. Guarded so this module stays usable outside jrl-cmakemodules.
+if(COMMAND jrl_export_find_module)
+    jrl_export_find_module(GMP)
+endif()
 set(CMAKE_MODULE_PATH "${MPFR_cmake_module_path_backup}")
 unset(MPFR_cmake_module_path_backup)
 
